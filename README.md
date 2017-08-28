@@ -2,8 +2,7 @@
 
 [![Build status](https://ci.appveyor.com/api/projects/status/ccu2yp2coad3oam0?svg=true)](https://ci.appveyor.com/project/cbusbey/quickfixn-jib50)
 
-For tutorials on how to use QuickFIX/n, see the `tutorial` folder at the root
-of this project or visit the [website](http://quickfixn.org/tutorial/creating-an-application.html).
+For tutorials on how to use QuickFIX/n, visit the [website](http://quickfixn.org/tutorial/creating-an-application.html).
 
 This README is about setting up your system to do QuickFIX/n
 development.
@@ -20,16 +19,15 @@ This project requires the following:
 **To run tests**
 
 * [NUnit](http://nunit.org)
-* xsltproc (can be gotten via cygwin, or by installing libxslt (which requires libxml2 and zlib)).
-  * xsltproc is only used for pretty-formatting the test output.  If you don't mind the error messages that appear because it's not found, you can ignore it.  ([We may get rid of this dependency.](https://github.com/connamara/quickfixn/issues/104)).
-
 
 Code Generation
 ---------------
 To regenerate the message and field class source from the Data Dictionaries, you need Ruby and the Nokogiri gem:
 
-    gem install nokogiri
+    gem install nokogiri -v 1.6.8.1
     generate.bat
+
+(Nokogiri versions 1.7+ require Ruby 2.0, so we must use this older version.)
 
 
 Build
@@ -87,7 +85,7 @@ Acceptance Tests
 ----------------
 To run the full suite of acceptance tests:
 
-    acceptance_test.bat
+    acceptance_test.ps1
 
 An HTML report of the test results will then be available here:
 
@@ -96,14 +94,14 @@ An HTML report of the test results will then be available here:
 To run one particular acceptance test, e.g. fix42\14e_IncorrectEnumValue.def:
 
     cd AcceptanceTest
-    runat.bat release 5003 definitions\server\fix42\14e_IncorrectEnumValue.def cfg\at_42.cfg
+    runat.ps1 release 5003 definitions\server\fix42\14e_IncorrectEnumValue.def cfg\at_42.cfg
 
-(See acceptance_test.bat for the proper port numbers and config files to use in the above command.)
+(See acceptance_test.ps1 for the proper port numbers and config files to use in the above command.)
 
 The test results will then be available in AcceptanceTests\TestResults.xml and
 debug information will be available in the AcceptanceTests\log directory.
 
-To run a test with the debugger, 
+To run a test with the debugger,
 
   1. Open the solution file in Visual Studio
   2. Right click on "AcceptanceTest" project and choose "Properties" from the menu
@@ -129,4 +127,4 @@ Licensing
 
 This software is available under the QuickFIX Software License. Please see the [LICENSE](LICENSE) for the terms specified by the QuickFIX Software License.
 
-[1]: http://quickfixn.org/images/qfn-logo/QuickFIX-n_logo-small.png
+[1]: http://quickfixn.org/web/public/images/qfn-logo/QuickFIX-n_logo-small.png

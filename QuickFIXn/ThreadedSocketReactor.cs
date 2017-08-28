@@ -81,7 +81,12 @@ namespace QuickFix
         /// </summary>
         public void Run()
         {
-            tcpListener_.Start();
+            lock (sync_)
+            {
+                if (State.SHUTDOWN_REQUESTED != state_)
+                    tcpListener_.Start();
+            }
+
             while (State.RUNNING == ReactorState)
             {
                 try
@@ -129,6 +134,14 @@ namespace QuickFix
         {
             client.LingerState = new LingerOption(false, 0);
             client.NoDelay = socketSettings.SocketNodelay;
+            if (socketSettings.SocketReceiveBufferSize.HasValue)
+            {
+                client.ReceiveBufferSize = socketSettings.SocketReceiveBufferSize.Value;
+            }
+            if (socketSettings.SocketSendBufferSize.HasValue)
+            {
+                client.SendBufferSize = socketSettings.SocketSendBufferSize.Value;
+            }
         }
 
         private void ShutdownClientHandlerThreads()
