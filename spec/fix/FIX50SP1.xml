@@ -260,7 +260,7 @@
    <component name='InstrmtGrp' required='N' />
    <component name='InstrmtLegGrp' required='N' />
    <component name='UndInstrmtGrp' required='N' />
-   <component name='LinesOfTextGrp' required='Y' />
+   <component name='LinesOfTextGrp' required='N' />
    <field name='URLLink' required='N' />
    <field name='RawDataLength' required='N' />
    <field name='RawData' required='N' />
@@ -279,7 +279,7 @@
    <component name='InstrmtLegGrp' required='N' />
    <field name='OrderID' required='N' />
    <field name='ClOrdID' required='N' />
-   <component name='LinesOfTextGrp' required='Y' />
+   <component name='LinesOfTextGrp' required='N' />
    <field name='RawDataLength' required='N' />
    <field name='RawData' required='N' />
   </message>
@@ -3432,7 +3432,7 @@
    <component name='AttrbGrp' required='N' />
   </component>
   <component name='LinesOfTextGrp'>
-   <group name='NoLinesOfText' required='Y'>
+   <group name='NoLinesOfText' required='N'>
     <field name='Text' required='Y' />
     <field name='EncodedTextLen' required='N' />
     <field name='EncodedText' required='N' />
@@ -5295,13 +5295,7 @@
    <value enum='M' description='MEDIUM' />
   </field>
   <field number='26' name='IOIRefID' type='STRING' />
-  <field number='27' name='IOIQty' type='STRING'>
-   <value enum='0' description='1000000000' />
-   <value enum='S' description='SMALL' />
-   <value enum='M' description='MEDIUM' />
-   <value enum='L' description='LARGE' />
-   <value enum='U' description='UNDISCLOSED_QUANTITY' />
-  </field>
+  <field number='27' name='IOIQty' type='STRING' />
   <field number='28' name='IOITransType' type='CHAR'>
    <value enum='C' description='CANCEL' />
    <value enum='N' description='NEW' />
@@ -5388,7 +5382,7 @@
    <value enum='L' description='LIST_EXECUTE' />
    <value enum='m' description='LIST_STRIKE_PRICE' />
    <value enum='M' description='LIST_STATUS_REQUEST' />
-   <value enum='n' description='XML_MESSAGE' />
+   <value enum='n' description='XML_NON_FIX' />
    <value enum='N' description='LIST_STATUS' />
    <value enum='o' description='REGISTRATION_INSTRUCTIONS' />
    <value enum='p' description='REGISTRATION_INSTRUCTIONS_RESPONSE' />
@@ -5529,7 +5523,7 @@
    <value enum='7' description='UNDISCLOSED' />
    <value enum='8' description='CROSS' />
    <value enum='9' description='CROSS_SHORT' />
-   <value enum='A' description='CROSS_SHORT_EXXMPT' />
+   <value enum='A' description='CROSS_SHORT_EXEMPT' />
    <value enum='B' description='AS_DEFINED' />
    <value enum='C' description='OPPOSITE' />
    <value enum='D' description='SUBSCRIBE' />

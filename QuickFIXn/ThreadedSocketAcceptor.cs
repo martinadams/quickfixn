@@ -1,377 +1,468 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Net;
-using System;
+using System.Threading;
+using Microsoft.Extensions.Logging;
+using QuickFix.Logger;
+using QuickFix.Store;
 
-namespace QuickFix
+namespace QuickFix;
+
+/// <summary>
+/// Acceptor implementation - with threads
+/// Creates a ThreadedSocketReactor for every listening endpoint.
+/// </summary>
+public class ThreadedSocketAcceptor : IAcceptor
 {
-    // TODO v2.0 - consider changing to internal
+    private const int TenSecondsInTicks = 10000;
+
+    private readonly Dictionary<SessionID, Session> _sessions = new();
+    private readonly SessionSettings _settings;
+    private readonly Dictionary<IPEndPoint, AcceptorSocketDescriptor> _socketDescriptorForAddress = new();
+    private readonly SessionFactory _sessionFactory;
+    private bool _disposed = false;
+    private readonly object _sync = new();
+    private readonly IQuickFixLoggerFactory _qfLoggerFactory;
+    private readonly LogFactoryAdapter? _logFactoryAdapter;
 
     /// <summary>
-    /// Acceptor implementation - with threads
-    /// Creates a ThreadedSocketReactor for every listening endpoint.
+    /// Create a ThreadedSocketAcceptor (with a legacy ILogFactory)
     /// </summary>
-    public class ThreadedSocketAcceptor : IAcceptor
+    /// <param name="application"></param>
+    /// <param name="storeFactory"></param>
+    /// <param name="settings"></param>
+    /// <param name="logFactory">If null, a NullQuickFixLoggerFactory (which produces no logs) will be used.</param>
+    /// <param name="messageFactory">If null, a DefaultMessageFactory will be created (using settings parameters)</param>
+    public ThreadedSocketAcceptor(
+        IApplication application,
+        IMessageStoreFactory storeFactory,
+        SessionSettings settings,
+        ILogFactory? logFactory = null,
+        IMessageFactory? messageFactory = null)
+        : this(
+            application,
+            storeFactory,
+            settings,
+            logFactory is null ? NullQuickFixLoggerFactory.Instance : new LogFactoryAdapter(logFactory),
+            messageFactory)
+    { }
+
+    /// <summary>
+    /// Create a ThreadedSocketAcceptor
+    /// </summary>
+    /// <param name="application"></param>
+    /// <param name="storeFactory"></param>
+    /// <param name="settings"></param>
+    /// <param name="loggerFactory">If null, a NullQuickFixLoggerFactory (which produces no logs) will be used.</param>
+    /// <param name="messageFactory">If null, a DefaultMessageFactory will be created (using settings parameters)</param>
+    public ThreadedSocketAcceptor(
+        IApplication application,
+        IMessageStoreFactory storeFactory,
+        SessionSettings settings,
+        ILoggerFactory? loggerFactory = null,
+        IMessageFactory? messageFactory = null)
+        : this(
+            application,
+            storeFactory,
+            settings,
+            loggerFactory is null
+                ? NullQuickFixLoggerFactory.Instance
+                : new MelQuickFixLoggerFactory(loggerFactory),
+            messageFactory)
+    { }
+
+    private ThreadedSocketAcceptor(
+        IApplication application,
+        IMessageStoreFactory storeFactory,
+        SessionSettings settings,
+        IQuickFixLoggerFactory qfLoggerFactory,
+        IMessageFactory? messageFactory = null)
     {
-        class AcceptorSocketDescriptor
+        if (qfLoggerFactory is LogFactoryAdapter lfa)
         {
-            #region Properties
+            // LogFactoryAdapter is only ever created in the constructor marked obsolete, which means we own it and
+            // must save a ref to it so we can dispose it later. Any other loggerFactory is owned by someone else
+            // so we'll leave the dispose up to them. This should be removed eventually together with the old ILog
+            // and ILogFactory.
+            _logFactoryAdapter = lfa;
+        }
+        IMessageFactory mf = messageFactory ?? new DefaultMessageFactory();
+        _settings = settings;
+        _sessionFactory = new SessionFactory(application, storeFactory, qfLoggerFactory, mf);
+        _qfLoggerFactory = qfLoggerFactory;
 
-            public ThreadedSocketReactor SocketReactor
+        try
+        {
+            foreach (SessionID sessionId in settings.GetSessions())
             {
-                get { return socketReactor_; }
-            }
-
-            public IPEndPoint Address
-            {
-                get { return socketEndPoint_; }
-            }
-
-            #endregion
-
-            #region Private Members
-
-            private ThreadedSocketReactor socketReactor_;
-            private IPEndPoint socketEndPoint_;
-            private Dictionary<SessionID, Session> acceptedSessions_ = new Dictionary<SessionID, Session>();
-
-            #endregion
-            
-            public AcceptorSocketDescriptor(IPEndPoint socketEndPoint, SocketSettings socketSettings, QuickFix.Dictionary sessionDict)
-            {
-                socketEndPoint_ = socketEndPoint;
-                socketReactor_ = new ThreadedSocketReactor(socketEndPoint_, socketSettings, sessionDict);
-            }
-
-            public void AcceptSession(Session session)
-            {
-                acceptedSessions_[session.SessionID] = session;
-            }
-
-            /// <summary>
-            /// Remove a session from those tied to this socket.
-            /// </summary>
-            /// <param name="sessionID">ID of session to be removed</param>
-            /// <returns>true if session removed, false if not found</returns>
-            public bool RemoveSession(SessionID sessionID)
-            {
-                return acceptedSessions_.Remove(sessionID);
-            }
-
-            public Dictionary<SessionID, Session> GetAcceptedSessions()
-            {
-                return new Dictionary<SessionID, Session>(acceptedSessions_);
+                SettingsDictionary dict = settings.Get(sessionId);
+                CreateSession(sessionId, dict);
             }
         }
-
-        private Dictionary<SessionID, Session> sessions_ = new Dictionary<SessionID, Session>();
-        private SessionSettings settings_;
-        private Dictionary<IPEndPoint, AcceptorSocketDescriptor> socketDescriptorForAddress_ = new Dictionary<IPEndPoint, AcceptorSocketDescriptor>();
-        private SessionFactory sessionFactory_;
-        private bool isStarted_ = false;
-        private object sync_ = new object();
-
-        #region Constructors
-
-        public ThreadedSocketAcceptor(IApplication application, IMessageStoreFactory storeFactory, SessionSettings settings)
-            : this(new SessionFactory(application, storeFactory), settings)
-        { }
-
-        public ThreadedSocketAcceptor(IApplication application, IMessageStoreFactory storeFactory, SessionSettings settings, ILogFactory logFactory)
-            : this(new SessionFactory(application, storeFactory, logFactory), settings)
-        { }
-
-        public ThreadedSocketAcceptor(IApplication application, IMessageStoreFactory storeFactory, SessionSettings settings, ILogFactory logFactory, IMessageFactory messageFactory)
-            : this(new SessionFactory(application, storeFactory, logFactory, messageFactory), settings)
-        { }
-
-        public ThreadedSocketAcceptor(SessionFactory sessionFactory, SessionSettings settings)
+        catch (Exception e)
         {
-            try
-            {
-                CreateSessions(settings, sessionFactory);
-            }
-            catch (System.Exception e)
-            {
-                throw new ConfigError(e.Message, e);
-            }
+            throw new ConfigError(e.Message, e);
         }
+    }
 
-        #endregion
+    #region Private Methods
 
-        #region Private Methods
+    private AcceptorSocketDescriptor GetAcceptorSocketDescriptor(SettingsDictionary dict)
+    {
+        int port = Convert.ToInt32(dict.GetLong(SessionSettings.SOCKET_ACCEPT_PORT));
+        SocketSettings socketSettings = new SocketSettings();
 
-        private void CreateSessions(SessionSettings settings, SessionFactory sessionFactory)
+        IPEndPoint socketEndPoint;
+        if (dict.Has(SessionSettings.SOCKET_ACCEPT_HOST))
         {
-            sessionFactory_ = sessionFactory;
-            settings_ = settings;
-            foreach (SessionID sessionID in settings.GetSessions())
-            {
-                QuickFix.Dictionary dict = settings.Get(sessionID);
-                CreateSession(sessionID, dict);
-            }
+            string host = dict.GetString(SessionSettings.SOCKET_ACCEPT_HOST);
 
-            if (0 == socketDescriptorForAddress_.Count)
-                throw new ConfigError("No acceptor sessions found in SessionSettings.");
-        }
-
-        private AcceptorSocketDescriptor GetAcceptorSocketDescriptor(Dictionary dict)
-        {
-            int port = System.Convert.ToInt32(dict.GetLong(SessionSettings.SOCKET_ACCEPT_PORT));
-            SocketSettings socketSettings = new SocketSettings();
-
-            IPEndPoint socketEndPoint;
-            if (dict.Has(SessionSettings.SOCKET_ACCEPT_HOST))
-            {
-                string host = dict.GetString(SessionSettings.SOCKET_ACCEPT_HOST);                
-                IPAddress[] addrs = Dns.GetHostAddresses(host);
-                socketEndPoint = new IPEndPoint(addrs[0], port);
-                // Set hostname (if it is not already configured)
-                socketSettings.ServerCommonName = socketSettings.ServerCommonName ?? host;
-            }
-            else
+            if (IsAnyIpAddress(host))
             {
                 socketEndPoint = new IPEndPoint(IPAddress.Any, port);
             }
-
-            socketSettings.Configure(dict);
-            
-
-            AcceptorSocketDescriptor descriptor;
-            if (!socketDescriptorForAddress_.TryGetValue(socketEndPoint, out descriptor))
+            else
             {
-                descriptor = new AcceptorSocketDescriptor(socketEndPoint, socketSettings, dict);
-                socketDescriptorForAddress_[socketEndPoint] = descriptor;
-            }
-
-            return descriptor;
-        }
-
-        /// <summary>
-        /// Create session, either at start-up or as an ad-hoc operation
-        /// </summary>
-        /// <param name="sessionID">ID of new session<param>
-        /// <param name="dict">config settings for new session</param></param>
-        /// <returns>true if session added successfully, false if session already exists or is not an acceptor</returns>
-        private bool CreateSession(SessionID sessionID, Dictionary dict)
-        {
-            if (!sessions_.ContainsKey(sessionID))
-            {
-                string connectionType = dict.GetString(SessionSettings.CONNECTION_TYPE);
-                if ("acceptor" == connectionType)
-                {
-                    AcceptorSocketDescriptor descriptor = GetAcceptorSocketDescriptor(dict);
-                    Session session = sessionFactory_.Create(sessionID, dict);
-                    descriptor.AcceptSession(session);
-                    sessions_[sessionID] = session;
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        private void StartAcceptingConnections()
-        {
-            lock (sync_)
-            {
-                /// FIXME StartSessionTimer();
-                foreach (AcceptorSocketDescriptor socketDescriptor in socketDescriptorForAddress_.Values)
-                {
-                    socketDescriptor.SocketReactor.Start();
-                    /// FIXME log_.Info("Listening for connections on " + socketDescriptor.getAddress());
-                }
+                IPAddress[] addrs = Dns.GetHostAddresses(host);
+                socketEndPoint = new IPEndPoint(addrs[0], port);
+                // Set hostname (if it is not already configured)
+                socketSettings.ServerCommonName ??= host;
             }
         }
-
-        private void StopAcceptingConnections()
+        else
         {
-            lock (sync_)
-            {
-                foreach (AcceptorSocketDescriptor socketDescriptor in socketDescriptorForAddress_.Values)
-                {
-                    socketDescriptor.SocketReactor.Shutdown();
-                    /// FIXME log_.Info("No longer accepting connections on " + socketDescriptor.getAddress());
-                }
-            }
+            socketEndPoint = new IPEndPoint(IPAddress.Any, port);
         }
 
-        private void LogoutAllSessions(bool force)
+        socketSettings.Configure(dict);
+
+        if (!_socketDescriptorForAddress.TryGetValue(socketEndPoint, out var descriptor))
         {
-            foreach (Session session in sessions_.Values)
-            {
-                try
-                {
-                    session.Logout();
-                }
-                catch (System.Exception e)
-                {
-                    /// FIXME logError(session.getSessionID(), "Error during logout", e);
-                    System.Console.WriteLine("Error during logout of Session " + session.SessionID + ": " + e.Message);
-                }
-            }
-
-            if (force && IsLoggedOn)
-            {
-                foreach (Session session in sessions_.Values)
-                {
-                    try
-                    {
-                        if (session.IsLoggedOn)
-                            session.Disconnect("Forcibly disconnecting session");
-                    }
-                    catch (System.Exception e)
-                    {
-                        /// FIXME logError(session.getSessionID(), "Error during disconnect", e);
-                        System.Console.WriteLine("Error during disconnect of Session " + session.SessionID + ": " + e.Message);
-                    }
-                }
-            }
-
-            if (!force)
-                WaitForLogout();
+            descriptor = new AcceptorSocketDescriptor(socketEndPoint, socketSettings, _qfLoggerFactory);
+            _socketDescriptorForAddress[socketEndPoint] = descriptor;
         }
 
-        /// <summary>
-        /// FIXME
-        /// </summary>
-        private void WaitForLogout()
-        {
-            System.Console.WriteLine("TODO - ThreadedSocketAcceptor.WaitForLogout not implemented!");
-            /*
-            int start = System.Environment.TickCount;
-            HashSet<Session> sessions = new HashSet<Session>(sessions_.Values);
-            while(sessions.Count > 0)
-            {
-                Thread.Sleep(100);
-                
-                int elapsed = System.Environment.TickCount - start;
-                Iterator<Session> sessionItr = loggedOnSessions.iterator();
-                while (sessionItr.hasNext())
-                {
-                    Session session = sessionItr.next();
-                    if (elapsed >= session.getLogoutTimeout() * 1000L)
-                    {
-                        session.disconnect("Logout timeout, force disconnect", false);
-                        sessionItr.remove();
-                    }
-                }
-                // Be sure we don't look forever
-                if (elapsed > 60000)
-                {
-                    log.warn("Stopping session logout wait after 1 minute");
-                    break;
-                }
-            }
-            */
-        }
-
-        #endregion
-
-        #region Acceptor Members
-
-        public void Start()
-        {
-            lock (sync_)
-            {
-                if (!isStarted_)
-                {
-                    StartAcceptingConnections();
-                    isStarted_ = true;
-                }
-            }
-        }
-
-        public void Stop()
-        {
-            Stop(false);
-        }
-
-        public void Stop(bool force)
-        {
-            StopAcceptingConnections();
-            LogoutAllSessions(force);
-            /// FIXME StopSessionTimer();
-            /// FIXME Session.UnregisterSessions(GetSessions());
-        }
-
-        /// <summary>
-        /// Check whether any sessions are logged on
-        /// </summary>
-        /// <returns>true if any session is logged on, else false</returns>
-        public bool IsLoggedOn
-        {
-            get
-            {
-                return sessions_.Values.Any(session => session.IsLoggedOn);
-            }
-        }
-
-        /// <summary>
-        /// Get the SessionIDs for the sessions managed by this acceptor.
-        /// </summary>
-        /// <returns>the SessionIDs for the sessions managed by this acceptor</returns>
-        public HashSet<SessionID> GetSessionIDs()
-        {
-            return new HashSet<SessionID>(sessions_.Keys);
-        }
-
-        /// <summary>
-        /// TODO: not yet implemented
-        /// </summary>
-        /// <returns></returns>
-        public Dictionary<SessionID, IPEndPoint> GetAcceptorAddresses()
-        {
-            throw new System.NotImplementedException();
-        }
-
-        /// <summary>
-        /// Add new session as an ad-oc (dynamic) operation
-        /// </summary>
-        /// <param name="sessionID">ID of new session<param>
-        /// <param name="dict">config settings for new session</param></param>
-        /// <returns>true if session added successfully, false if session already exists or is not an acceptor</returns>
-        public bool AddSession(SessionID sessionID, Dictionary dict)
-        {
-            lock (settings_)
-                if (!settings_.Has(sessionID)) // session won't be in settings if ad-hoc creation after startup
-                    settings_.Set(sessionID, dict); // need to to this here to merge in default config settings
-                else
-                    return false; // session already exists
-
-            if (CreateSession(sessionID, dict))
-                return true;
-
-            lock (settings_) // failed to create session, so remove from settings
-                settings_.Remove(sessionID);
-            return false;
-        }
-
-
-        /// <summary>
-        /// Ad-hoc removal of an existing session
-        /// </summary>
-        /// <param name="sessionID">ID of session to be removed</param>
-        /// <param name="terminateActiveSession">if true, force disconnection and removal of session even if it has an active connection</param>
-        /// <returns>true if session removed or not already present; false if could not be removed due to an active connection</returns>
-        public bool RemoveSession(SessionID sessionID, bool terminateActiveSession)
-        {
-            Session session = null;
-            if (sessions_.TryGetValue(sessionID, out session))
-            {
-                if (session.IsLoggedOn && !terminateActiveSession)
-                    return false;
-                session.Disconnect("Dynamic session removal");
-                foreach (AcceptorSocketDescriptor descriptor in socketDescriptorForAddress_.Values)
-                    if (descriptor.RemoveSession(sessionID))
-                        break;
-                sessions_.Remove(sessionID);
-                session.Dispose();
-                lock (settings_)
-                    settings_.Remove(sessionID);
-            }
-            return true;
-        }
-
-        #endregion
+        return descriptor;
     }
+
+    /// <summary>
+    /// Checks if the host address is the "any" address in either IPv4 (0.0.0.0) or IPv6 (::)
+    /// </summary>
+    /// <param name="host"></param>
+    /// <returns></returns>
+    private static bool IsAnyIpAddress(string host)
+    {
+        return IPAddress.TryParse(host, out IPAddress? address) &&
+               (address.Equals(IPAddress.Any) ||
+                address.Equals(IPAddress.IPv6Any));
+    }
+
+    /// <summary>
+    /// Create session, either at start-up or as an ad-hoc operation
+    /// </summary>
+    /// <param name="sessionId">ID of new session</param>
+    /// <param name="dict">config settings for new session</param>
+    /// <returns>true if session added successfully, false if session already exists or is not an acceptor</returns>
+    private bool CreateSession(SessionID sessionId, SettingsDictionary dict)
+    {
+        if (!_sessions.ContainsKey(sessionId))
+        {
+            string connectionType = dict.GetString(SessionSettings.CONNECTION_TYPE);
+            if ("acceptor" == connectionType)
+            {
+                AcceptorSocketDescriptor descriptor = GetAcceptorSocketDescriptor(dict);
+                Session session = _sessionFactory.Create(sessionId, dict);
+                descriptor.AcceptSession(session);
+                _sessions[sessionId] = session;
+
+                // start SocketReactor if it was created via AddSession call
+                // and if acceptor is already started
+                if (IsStarted && !_disposed)
+                {
+                    descriptor.SocketReactor.Start();
+                }
+
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void StartAcceptingConnections()
+    {
+        lock (_sync)
+        {
+            foreach (AcceptorSocketDescriptor socketDescriptor in _socketDescriptorForAddress.Values)
+            {
+                socketDescriptor.SocketReactor.Start();
+            }
+        }
+    }
+
+    private void StopAcceptingConnections()
+    {
+        lock (_sync)
+        {
+            foreach (AcceptorSocketDescriptor socketDescriptor in _socketDescriptorForAddress.Values)
+            {
+                socketDescriptor.SocketReactor.Shutdown();
+            }
+        }
+    }
+
+    private void LogonAllSessions()
+    {
+        foreach (Session session in _sessions.Values)
+        {
+            try
+            {
+                session.Logon();
+            }
+            catch (Exception e)
+            {
+                session.Log.Log(LogLevel.Error, e, "Error during logon of Session {SessionID}: {Message}",
+                    session.SessionID, e.Message);
+            }
+        }
+    }
+
+    private void LogoutAllSessions(bool force)
+    {
+        foreach (Session session in _sessions.Values)
+        {
+            try
+            {
+                session.Logout();
+            }
+            catch (Exception e)
+            {
+                session.Log.Log(LogLevel.Error, e, "Error during logout of Session {SessionID}: {Message}",
+                    session.SessionID, e.Message);
+            }
+        }
+
+        if (force && IsLoggedOn)
+        {
+            DisconnectSessions("Forcibly disconnecting sessions");
+        }
+
+        if (!force)
+            WaitForLogout();
+    }
+
+    private void WaitForLogout()
+    {
+        int start = Environment.TickCount;
+        using( var resetEvent = new ManualResetEvent( false ) )
+        {
+            while (IsLoggedOn && (Environment.TickCount - start) < TenSecondsInTicks)
+            {
+                resetEvent.WaitOne( 100 );
+            }
+        }
+        DisconnectSessions("Logout timeout, force disconnect");
+    }
+
+    private void DisconnectSessions(string disconnectMessage)
+    {
+        foreach (Session session in _sessions.Values)
+        {
+            try
+            {
+                if (session.IsLoggedOn)
+                    session.Disconnect(disconnectMessage);
+            }
+            catch (Exception e)
+            {
+                session.Log.Log(LogLevel.Error, e, "Error during disconnect of Session {SessionID}, {Message}",
+                    session.SessionID, e.Message);
+            }
+        }
+    }
+
+    private void DisposeSessions()
+    {
+        foreach (var session in _sessions.Values)
+        {
+            session.Dispose();
+        }
+    }
+
+    #endregion
+
+    #region Acceptor Members
+
+    public void Start()
+    {
+        if (_disposed)
+            throw new ObjectDisposedException(GetType().Name);
+
+        lock (_sync)
+        {
+            if (!IsStarted)
+            {
+                LogonAllSessions();
+                StartAcceptingConnections();
+                IsStarted = true;
+            }
+        }
+    }
+
+    public void Stop()
+    {
+        Stop(false);
+    }
+
+    public void Stop(bool force)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        lock( _sync )
+        {
+            if( IsStarted )
+            {
+                IsStarted = false;
+                LogoutAllSessions(force);
+                StopAcceptingConnections();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Check whether any sessions are logged on
+    /// </summary>
+    /// <returns>true if any session is logged on, else false</returns>
+    public bool IsLoggedOn
+    {
+        get
+        {
+            return _sessions.Values.Any(session => session.IsLoggedOn);
+        }
+    }
+
+    /// <summary>
+    /// Gets a value indicating whether this instance is started.
+    /// </summary>
+    /// <value>
+    /// <c>true</c> if this instance is started; otherwise, <c>false</c>.
+    /// </value>
+    public bool IsStarted { get; private set; } = false;
+
+    /// <summary>
+    /// (For use by Unit Tests)
+    /// Gets a value indicating whether this instance is started.
+    /// </summary>
+    /// <value>
+    /// <c>true</c> if this instance is started; otherwise, <c>false</c>.
+    /// </value>
+    internal bool AreSocketsRunning
+    {
+        get
+        {
+            return _socketDescriptorForAddress.All( s => s.Value.SocketReactor.IsRunning );
+        }
+    }
+
+    /// <summary>
+    /// Get the SessionIDs for the sessions managed by this acceptor.
+    /// </summary>
+    /// <returns>the SessionIDs for the sessions managed by this acceptor</returns>
+    public HashSet<SessionID> GetSessionIDs()
+    {
+        return new HashSet<SessionID>(_sessions.Keys);
+    }
+
+    /// <summary>
+    /// TODO: not yet implemented
+    /// </summary>
+    /// <returns></returns>
+    public Dictionary<SessionID, IPEndPoint> GetAcceptorAddresses()
+    {
+        throw new NotImplementedException();
+    }
+
+    /// <summary>
+    /// Add new session as an ad-oc (dynamic) operation
+    /// </summary>
+    /// <param name="sessionId">ID of new session</param>
+    /// <param name="dict">config settings for new session</param>
+    /// <returns>true if session added successfully, false if session already exists or is not an acceptor</returns>
+    public bool AddSession(SessionID sessionId, SettingsDictionary dict)
+    {
+        lock (_settings)
+            if (!_settings.Has(sessionId)) // session won't be in settings if ad-hoc creation after startup
+                _settings.Set(sessionId, dict); // need to to this here to merge in default config settings
+            else
+                return false; // session already exists
+
+        if (CreateSession(sessionId, dict))
+            return true;
+
+        lock (_settings) // failed to create session, so remove from settings
+            _settings.Remove(sessionId);
+        return false;
+    }
+
+
+    /// <summary>
+    /// Ad-hoc removal of an existing session
+    /// </summary>
+    /// <param name="sessionId">ID of session to be removed</param>
+    /// <param name="terminateActiveSession">if true, force disconnection and removal of session even if it has an active connection</param>
+    /// <returns>true if session removed or not already present; false if could not be removed due to an active connection</returns>
+    public bool RemoveSession(SessionID sessionId, bool terminateActiveSession)
+    {
+        if (_sessions.TryGetValue(sessionId, out var session))
+        {
+            if (session.IsLoggedOn && !terminateActiveSession)
+                return false;
+            session.Disconnect("Dynamic session removal");
+            foreach (AcceptorSocketDescriptor descriptor in _socketDescriptorForAddress.Values)
+                if (descriptor.RemoveSession(sessionId))
+                    break;
+            _sessions.Remove(sessionId);
+            session.Dispose();
+            lock (_settings)
+                _settings.Remove(sessionId);
+        }
+        return true;
+    }
+
+    #endregion
+
+    /// <summary>
+    /// Any subclasses of ThreadedSocketAcceptor should override this if they have resources to dispose
+    /// Any override should call base.Dispose(disposing).
+    /// </summary>
+    /// <param name="disposing">true if called from Dispose()</param>
+    protected void Dispose(bool disposing)
+    {
+        if(_disposed) { return; }
+        try
+        {
+            Stop();
+            DisposeSessions();
+            _logFactoryAdapter?.Dispose();
+            _sessions.Clear();
+            _disposed = true;
+        }
+        catch (ObjectDisposedException)
+        {
+            // ignore
+        }
+    }
+    /// <summary>
+    /// Disposes created sessions
+    /// </summary>
+    /// <remarks>
+    /// To simply stop the acceptor without disposing sessions, use Stop() or Stop(bool)
+    /// </remarks>
+    public void Dispose()
+    {
+        Dispose( true );
+        GC.SuppressFinalize( this );
+    }
+
+    ~ThreadedSocketAcceptor() => Dispose(false);
 }

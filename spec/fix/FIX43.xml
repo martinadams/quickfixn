@@ -91,6 +91,9 @@
       <field name="EncodedTextLen" required="N" />
       <field name="EncodedText" required="N" />
     </message>
+    <message name="XMLnonFIX" msgtype="n" msgcat="admin">
+      <!-- this message has no body fields -->
+    </message>
     <message name="Advertisement" msgtype="7" msgcat="app">
       <field name="AdvId" required="Y" />
       <field name="AdvTransType" required="Y" />
@@ -152,7 +155,7 @@
       <group name="NoRelatedSym" required="N">
         <component name="Instrument" required="N" />
       </group>
-      <group name="LinesOfText" required="Y">
+      <group name="LinesOfText" required="N">
         <field name="Text" required="Y" />
         <field name="EncodedTextLen" required="N" />
         <field name="EncodedText" required="N" />
@@ -177,7 +180,7 @@
       </group>
       <field name="OrderID" required="N" />
       <field name="ClOrdID" required="N" />
-      <group name="LinesOfText" required="Y">
+      <group name="LinesOfText" required="N">
         <field name="Text" required="Y" />
         <field name="EncodedTextLen" required="N" />
         <field name="EncodedText" required="N" />
@@ -2404,7 +2407,7 @@
       <value enum="k" description="BID_REQUEST" />
       <value enum="l" description="BID_RESPONSE" />
       <value enum="m" description="LIST_STRIKE_PRICE" />
-      <value enum="n" description="XML_MESSAGE" />
+      <value enum="n" description="XML_NON_FIX" />
       <value enum="o" description="REGISTRATION_INSTRUCTIONS" />
       <value enum="p" description="REGISTRATION_INSTRUCTIONS_RESPONSE" />
       <value enum="q" description="ORDER_MASS_CANCEL_REQUEST" />

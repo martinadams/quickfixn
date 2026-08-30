@@ -1,20 +1,18 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 
-namespace QuickFix
+namespace QuickFix.DataDictionary;
+
+[Obsolete("This class will be removed in 1.16 (because it's unused)")]
+public class InvalidMessageTypeException : ApplicationException
 {
-    public class InvalidMessageTypeException : ApplicationException
-    {
-        public InvalidMessageTypeException() { }
-        public InvalidMessageTypeException(string message)
-            : base(message) { }
-        public InvalidMessageTypeException(string message, System.Exception inner)
-            : base(message, inner) { }
-        protected InvalidMessageTypeException(
-            System.Runtime.Serialization.SerializationInfo info,
-            System.Runtime.Serialization.StreamingContext context)
-            : base(info, context) { }
-    }
+    [Obsolete("This class will be removed in 1.16 (because it's unused)")]
+    public InvalidMessageTypeException() { }
+
+    [Obsolete("This class will be removed in 1.16 (because it's unused)")]
+    public InvalidMessageTypeException(string message)
+        : base(message) { }
+
+    [Obsolete("This class will be removed in 1.16 (because it's unused)")]
+    public InvalidMessageTypeException(string message, System.Exception inner)
+        : base(message, inner) { }
 }

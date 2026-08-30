@@ -1,46 +1,42 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 
-namespace QuickFix.Util
+namespace QuickFix.Util;
+
+/// <summary>
+/// Utility class for serializing/deserializing a date (which is strangely not-trivial in C#).
+/// Don't use these in your client app.
+/// </summary>
+public static class UtcDateTimeSerializer
 {
+    private const string FORMAT = "yyyyMMdd-HH:mm:ss.ffffff K";
+
     /// <summary>
-    /// Utility class for serializing/deserializing a date (which is strangely not-trivial in C#).
-    /// Don't use these in your client app.
+    /// Not for use by client apps.
     /// </summary>
-    public static class UtcDateTimeSerializer
+    /// <param name="d"></param>
+    /// <returns></returns>
+    public static string ToString(DateTime d)
     {
-        private const string FORMAT = "yyyyMMdd-HH:mm:ss.ffffff K";
+        return d.ToString(FORMAT);
+    }
 
-        /// <summary>
-        /// Not for use by client apps.
-        /// </summary>
-        /// <param name="d"></param>
-        /// <returns></returns>
-        static public string ToString(DateTime d)
+    /// <summary>
+    /// Not for use by client apps.
+    /// </summary>
+    /// <param name="s"></param>
+    /// <returns></returns>
+    public static DateTime FromString(string s)
+    {
+        try
         {
-            return d.ToString(FORMAT);
+            DateTime d = DateTime.ParseExact(s, FORMAT,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AdjustToUniversal);
+            return d;
         }
-
-        /// <summary>
-        /// Not for use by client apps.
-        /// </summary>
-        /// <param name="s"></param>
-        /// <returns></returns>
-        static public DateTime FromString(string s)
+        catch (Exception)
         {
-            try
-            {
-                DateTime d = DateTime.ParseExact(s, FORMAT,
-                    System.Globalization.CultureInfo.InvariantCulture,
-                    System.Globalization.DateTimeStyles.AdjustToUniversal);
-                return d;
-            }
-            catch (Exception)
-            {
-                return DateTime.MinValue;
-            }
+            return DateTime.MinValue;
         }
     }
 }

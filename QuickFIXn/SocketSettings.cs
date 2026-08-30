@@ -1,170 +1,247 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Security.Authentication;
-using System.Text;
 
-namespace QuickFix
+namespace QuickFix;
+
+/// <summary>
+/// Keep all socket settings in one place
+/// </summary>
+/// <remarks>
+/// Property setters are internal so they can be set in tests, otherwise the settings should
+/// be set using the <see cref="Configure"/> function
+/// </remarks>
+public class SocketSettings : ICloneable
 {
+    #region Socket Settings
+
     /// <summary>
-    /// Keep all socket settings in one place
+    /// Gets a value that specifies whether the <see cref="T:System.Net.Sockets.Socket"/> is using the Nagle algorithm.
+    /// </summary>
+    /// <value>
+    /// <c>false</c> if the socket uses the Nagle algorithm; otherwise, <c>true</c>. The default is <c>false</c>.
+    /// </value>
+    public bool SocketNodelay { get; internal set; }
+
+    /// <summary>
+    /// Gets the size of the <see cref="T:System.Net.Sockets.Socket"/> receive buffer.
+    /// </summary>
+    /// <value>
+    /// The size, in bytes, of the receive buffer. A <c>null</c> value defaults to 8192.
+    /// </value>
+    public int? SocketReceiveBufferSize { get; internal set; }
+
+    /// <summary>
+    /// Gets the size of the <see cref="T:System.Net.Sockets.Socket"/> send buffer.
+    /// </summary>
+    /// <value>
+    /// The size, in bytes, of the send buffer. A <c>null</c> value defaults to 8192.
+    /// </value>
+    public int? SocketSendBufferSize { get; internal set; }
+
+    /// <summary>
+    /// Gets the amount of time in milliseconds after which a synchronous
+    /// <see cref="T:System.Net.Sockets.Socket"/> Receive() call will time out.
+    /// </summary>
+    /// <value>
+    /// The time-out value, in milliseconds. A <c>null</c>, <c>0</c> or <c>-1</c>
+    /// value indicates an infinite time-out period.
+    /// </value>
+    public int? SocketReceiveTimeout { get; internal set; }
+
+    /// <summary>
+    /// Gets the amount of time in milliseconds after which a synchronous
+    /// <see cref="T:System.Net.Sockets.Socket"/> Send() call will time out.
+    /// </summary>
+    /// <value>
+    /// The time-out value, in milliseconds. A <c>null</c>, <c>0</c> or <c>-1</c>
+    /// value indicates an infinite time-out period.
+    /// </value>
+    public int? SocketSendTimeout { get; internal set; }
+
+    /// <summary>
+    /// Gets a value that specifies whether the proxy server settings should be ignored.
+    /// </summary>
+    /// <value>
+    /// <c>false</c> if connection should use proxy; otherwise for ignoring proxy, <c>true</c>. The default is <c>false</c>.
+    /// </value>
+    public bool SocketIgnoreProxy { get; internal set; }
+    #endregion
+
+    #region SSL Settings
+
+    /// <summary>
+    /// Gets the Server's Common Name (CN) .
+    /// </summary>
+    /// <value>
+    /// The common name is the name of the Server's certificate and it is usually
+    /// the DNS name of the server.
+    /// </value>
+    public string? ServerCommonName { get; internal set; }
+
+    /// <summary>
+    /// Gets a value indicating whether certificates of the other endpoint should be validated.
+    /// </summary>
+    /// <value>
+    /// <c>true</c> if certificates should be validated; otherwise, <c>false</c>.
+    /// </value>
+    public bool ValidateCertificates { get; internal set; }
+
+    /// <summary>
+    /// Gets the path to the client/server-certificate.
+    /// </summary>
+    /// <value>
+    /// The certificate path.
+    /// </value>
+    public string? CertificatePath { get; internal set; }
+
+    /// <summary>
+    /// Gets the certificate password.
+    /// </summary>
+    /// <value>
+    /// The certificate password.
+    /// </value>
+    public string? CertificatePassword { get; internal set; }
+
+    /// <summary>
+    /// Gets the SSL protocol to use (for initiator) or accept (for acceptor)
+    /// </summary>
+    /// <value>
+    /// The SSL protocol.
+    /// </value>
+    public SslProtocols SslProtocol { get; internal set; }
+
+    /// <summary>
+    /// Gets a value indicating whether the check for certificate revocation (use CRL)
+    /// </summary>
+    /// <value>
+    /// <c>true</c> if certificate revocation status should be checked; otherwise, <c>false</c>.
+    /// </value>
+    public bool CheckCertificateRevocation { get; internal set; }
+
+    /// <summary>
+    /// Gets a value indicating whether SSL should be used for the socket.
+    /// </summary>
+    /// <value>
+    ///   <c>true</c> if SSL should be enabled; otherwise, <c>false</c>.
+    /// </value>
+    public bool UseSSL { get; private set; }
+
+    /// <summary>
+    /// Path to .cer with the public part of the Certificate CA to validate clients against (acceptor setting).
+    /// </summary>
+    /// <value>
+    /// The CA certificate path.
+    /// </value>
+    public string? CACertificatePath { get; set; }
+
+    /// <summary>
+    /// Gets a value indicating whether client certificate are required (acceptor setting).
+    /// </summary>
+    /// <value>
+    /// <c>true</c> if [require client certificate]; otherwise, <c>false</c>.
+    /// </value>
+    public bool RequireClientCertificate { get; internal set; }
+
+    #endregion
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="SocketSettings"/> class.
+    /// Here we setup the default values
+    /// </summary>
+    public SocketSettings()
+    {
+        ValidateCertificates = true;
+        SslProtocol = SslProtocols.None;
+        CheckCertificateRevocation = true;
+        RequireClientCertificate = true;
+        SocketNodelay = true;
+        SocketIgnoreProxy = false;
+    }
+
+    /// <summary>
+    /// Setup socket settings based on settings specified in dictionary
     /// </summary>
     /// <remarks>
-    /// Property setters are internal so they can be set in tests, otherwise the settings should
-    /// be set using the <see cref="Configure"/> function
+    /// used "Configure" as name since it is used in a lot of other places,
+    /// alternative names are ReadSettings or FromDictionary
     /// </remarks>
-    public class SocketSettings
+    /// <param name="settingsDictionary">the dictionary to read the settings from</param>
+    public void Configure(QuickFix.SettingsDictionary settingsDictionary)
     {
-        public bool SocketNodelay = true;
+        if (settingsDictionary.Has(SessionSettings.SOCKET_IGNORE_PROXY))
+            SocketIgnoreProxy = settingsDictionary.GetBool(SessionSettings.SOCKET_IGNORE_PROXY);
 
-        #region SSL Settings
+        if (settingsDictionary.Has(SessionSettings.SOCKET_NODELAY))
+            SocketNodelay = settingsDictionary.GetBool(SessionSettings.SOCKET_NODELAY);
 
-        /// <summary>
-        /// Gets the Server's Common Name (CN) .
-        /// </summary>
-        /// <value>
-        /// The common name is the name of the Server's certificate and it is usually
-        /// the DNS name of the server.
-        /// </value>
-        public string ServerCommonName { get; internal set; }
+        if (settingsDictionary.Has(SessionSettings.SOCKET_RECEIVE_BUFFER_SIZE))
+            SocketReceiveBufferSize = settingsDictionary.GetInt(SessionSettings.SOCKET_RECEIVE_BUFFER_SIZE);
 
-        /// <summary>
-        /// Gets a value indicating whether certificates of the other endpoint should be validated.
-        /// </summary>
-        /// <value>
-        /// <c>true</c> if certificates should be validated; otherwise, <c>false</c>.
-        /// </value>
-        public bool ValidateCertificates { get; internal set; }
+        if (settingsDictionary.Has(SessionSettings.SOCKET_SEND_BUFFER_SIZE))
+            SocketSendBufferSize = settingsDictionary.GetInt(SessionSettings.SOCKET_SEND_BUFFER_SIZE);
 
-        /// <summary>
-        /// Gets the path the the client/server-certificate.
-        /// </summary>
-        /// <value>
-        /// The certificate path.
-        /// </value>
-        public string CertificatePath { get; internal set; }
+        if (settingsDictionary.Has(SessionSettings.SOCKET_RECEIVE_TIMEOUT))
+            SocketReceiveTimeout = settingsDictionary.GetInt(SessionSettings.SOCKET_RECEIVE_TIMEOUT);
 
-        /// <summary>
-        /// Gets the certificate password.
-        /// </summary>
-        /// <value>
-        /// The certificate password.
-        /// </value>
-        public string CertificatePassword { get; internal set; }
+        if (settingsDictionary.Has(SessionSettings.SOCKET_SEND_TIMEOUT))
+            SocketSendTimeout = settingsDictionary.GetInt(SessionSettings.SOCKET_SEND_TIMEOUT);
 
-        /// <summary>
-        /// Gets the SSL protocol to use (for initiator) or accept (for acceptor)
-        /// </summary>
-        /// <value>
-        /// The SSL protocol.
-        /// </value>
-        public SslProtocols SslProtocol { get; internal set; }
+        if (settingsDictionary.Has(SessionSettings.SSL_SERVERNAME))
+            ServerCommonName = settingsDictionary.GetString(SessionSettings.SSL_SERVERNAME);
 
-        /// <summary>
-        /// Gets a value indicating whether the check for certificate revocation (use CRL)
-        /// </summary>
-        /// <value>
-        /// <c>true</c> if certificate revocation status should be checked; otherwise, <c>false</c>.
-        /// </value>
-        public bool CheckCertificateRevocation { get; internal set; }
+        if (settingsDictionary.Has(SessionSettings.SSL_CA_CERTIFICATE))
+            CACertificatePath = settingsDictionary.GetString(SessionSettings.SSL_CA_CERTIFICATE);
 
-        /// <summary>
-        /// Gets a value indicating whether SSL should be used for the socket.
-        /// </summary>
-        /// <value>
-        ///   <c>true</c> if SSL should be enabled; otherwise, <c>false</c>.
-        /// </value>
-        public bool UseSSL { get; private set; }
+        if (settingsDictionary.Has(SessionSettings.SSL_CERTIFICATE))
+            CertificatePath = settingsDictionary.GetString(SessionSettings.SSL_CERTIFICATE);
 
+        if (settingsDictionary.Has(SessionSettings.SSL_CERTIFICATE_PASSWORD))
+            CertificatePassword = settingsDictionary.GetString(SessionSettings.SSL_CERTIFICATE_PASSWORD);
 
-        /// <summary>
-        /// Path to .cer with the public part of the Certificate CA to validate clients against (acceptor setting).
-        /// </summary>
-        /// <value>
-        /// The CA certificate path.
-        /// </value>
-        public string CACertificatePath { get; set; }
+        if (settingsDictionary.Has(SessionSettings.SSL_VALIDATE_CERTIFICATES))
+            ValidateCertificates = settingsDictionary.GetBool(SessionSettings.SSL_VALIDATE_CERTIFICATES);
 
-        /// <summary>
-        /// Gets a value indicating whether client certificate are required (acceptor setting).
-        /// </summary>
-        /// <value>
-        /// <c>true</c> if [require client certificate]; otherwise, <c>false</c>.
-        /// </value>
-        public bool RequireClientCertificate { get; internal set; }
-        #endregion
-
-        /// <summary>
-        /// Initializes a new instance of the <see cref="SocketSettings"/> class.
-        /// Here we setup the default values
-        /// </summary>
-        public SocketSettings()
+        if (settingsDictionary.Has(SessionSettings.SSL_CHECK_CERTIFICATE_REVOCATION))
         {
-            ValidateCertificates = true;
-            SslProtocol = SslProtocols.Default;
-            CheckCertificateRevocation = true;
-            RequireClientCertificate = true;
+            // can only be true if ValdateCertificates is true (this is noted in the config docs)
+            CheckCertificateRevocation = ValidateCertificates && settingsDictionary.GetBool(SessionSettings.SSL_CHECK_CERTIFICATE_REVOCATION);
         }
 
-        /// <summary>
-        /// Setup socket settings based on setttings specified in dictionary
-        /// </summary>
-        /// <remarks>
-        /// used "Configure" as name since it is used in a lot of other places, 
-        /// alternative names are ReadSettings or FromDictionary 
-        /// </remarks>
-        /// <param name="dictionary">the dictionary to read the settings from</param>
-        public void Configure(QuickFix.Dictionary dictionary)
+        // Use setting for client certificate check if one exist
+        // otherwise enable client certificate check if a ca certificate is specified
+        if (settingsDictionary.Has(SessionSettings.SSL_REQUIRE_CLIENT_CERTIFICATE))
+            RequireClientCertificate = settingsDictionary.GetBool(SessionSettings.SSL_REQUIRE_CLIENT_CERTIFICATE);
+
+        // Use setting for SSL if one exist
+        // otherwise enable ssl if certificate path is specified
+        if (settingsDictionary.Has(SessionSettings.SSL_ENABLE))
+            UseSSL = settingsDictionary.GetBool(SessionSettings.SSL_ENABLE);
+        else
+            UseSSL = !string.IsNullOrEmpty(CertificatePath);
+
+        if (settingsDictionary.Has(SessionSettings.SSL_PROTOCOLS))
         {
-            if (dictionary.Has(SessionSettings.SOCKET_NODELAY))
-                SocketNodelay = dictionary.GetBool(SessionSettings.SOCKET_NODELAY);
+            var protocolString = settingsDictionary.GetString(SessionSettings.SSL_PROTOCOLS);
 
-            if (dictionary.Has(SessionSettings.SSL_SERVERNAME))
-                ServerCommonName = dictionary.GetString(SessionSettings.SSL_SERVERNAME);
-
-            if (dictionary.Has(SessionSettings.SSL_CA_CERTIFICATE))
-                CACertificatePath = dictionary.GetString(SessionSettings.SSL_CA_CERTIFICATE);
-
-            if (dictionary.Has(SessionSettings.SSL_CERTIFICATE))
-                CertificatePath = dictionary.GetString(SessionSettings.SSL_CERTIFICATE);
-
-            if (dictionary.Has(SessionSettings.SSL_CERTIFICATE_PASSWORD))
-                CertificatePassword = dictionary.GetString(SessionSettings.SSL_CERTIFICATE_PASSWORD);
-
-            if (dictionary.Has(SessionSettings.SSL_VALIDATE_CERTIFICATES))
-                ValidateCertificates = dictionary.GetBool(SessionSettings.SSL_VALIDATE_CERTIFICATES);
-
-            if (dictionary.Has(SessionSettings.SSL_CHECK_CERTIFICATE_REVOCATION))
-                CheckCertificateRevocation = dictionary.GetBool(SessionSettings.SSL_CHECK_CERTIFICATE_REVOCATION);
-
-            // Use setting for client certificate check if one exist 
-            // otherwise enable client certificate check if a ca certificate is specified
-            if (dictionary.Has(SessionSettings.SSL_REQUIRE_CLIENT_CERTIFICATE))
-                RequireClientCertificate = dictionary.GetBool(SessionSettings.SSL_REQUIRE_CLIENT_CERTIFICATE);
-
-            // Use setting for SSL if one exist 
-            // otherwise enable ssl if certificate path is specified 
-            if (dictionary.Has(SessionSettings.SSL_ENABLE))
-                UseSSL = dictionary.GetBool(SessionSettings.SSL_ENABLE);
-            else
-                UseSSL = !string.IsNullOrEmpty(CertificatePath);
-
-            if (dictionary.Has(SessionSettings.SSL_PROTOCOLS))
+            try
             {
-                var protocolString = dictionary.GetString(SessionSettings.SSL_PROTOCOLS);
-
-                try
-                {
-                    SslProtocol = (System.Security.Authentication.SslProtocols)
-                        Enum.Parse(typeof(System.Security.Authentication.SslProtocols), protocolString, true);
-                }
-                catch (Exception)
-                {
-                    // TODO: figure out a way to log this somehow (even though it's not likely to occur)
-                }
+                SslProtocol = (System.Security.Authentication.SslProtocols)
+                    Enum.Parse(typeof(System.Security.Authentication.SslProtocols), protocolString, true);
+            }
+            catch (Exception)
+            {
+                // TODO: figure out a way to log this somehow (even though it's not likely to occur)
             }
         }
+    }
 
+    object ICloneable.Clone()
+    {
+        return Clone();
+    }
 
+    public SocketSettings Clone()
+    {
+        return (SocketSettings)MemberwiseClone();
     }
 }

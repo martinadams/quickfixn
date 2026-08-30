@@ -1,427 +1,427 @@
 using System;
 using System.Collections.Generic;
+using Microsoft.Extensions.Logging;
+using QuickFix.Store;
+using MessagesBySeqNum = System.Collections.Generic.Dictionary<ulong, QuickFix.Message>;
 
-namespace QuickFix
+namespace QuickFix;
+
+// v2 TODO - consider making this internal
+/// <summary>
+/// Used by the session communications code. Not intended to be used by applications.
+/// </summary>
+public class SessionState : IDisposable
 {
-    // v2 TODO - consider making this internal
+    #region Private Members
+
+    private readonly object _sync = new();
+    private bool _isEnabled = true;
+    private bool _receivedLogon = false;
+    private bool _receivedReset = false;
+    private bool _sentLogon = false;
+    private bool _sentLogout = false;
+    private bool _sentReset = false;
+    private string _logoutReason = "";
+    private int _testRequestCounter = 0;
+    private int _heartBtInt = 0;
+    private int _heartBtIntAsMilliSecs = 0;
+    private DateTime _lastReceivedTimeDt = DateTime.MinValue;
+    private DateTime _lastSentTimeDt = DateTime.MinValue;
+    private int _logonTimeout = 10;
+    private long _logonTimeoutAsMilliSecs = 10 * 1000;
+    private int _logoutTimeout = 2;
+    private long _logoutTimeoutAsMilliSecs = 2 * 1000;
+    private readonly ResendRange _resendRange = new ();
+    private MessagesBySeqNum _msgQueue = new ();
+
+    #endregion
+
+    #region Unsynchronized Properties
+
+    public IMessageStore MessageStore
+    { get; }
+
+    public bool IsInitiator
+    { get; set; }
+
+    public bool ShouldSendLogon => IsInitiator && !SentLogon;
+
+    public ILogger Log { get; }
+
     /// <summary>
-    /// Used by the session communications code. Not intended to be used by applications.
+    /// True if the last message processed was an admin message from the queue.
+    /// Needed for an obscure SequenceReset scenario (see issue #390).
     /// </summary>
-    public class SessionState : IDisposable
+    internal bool LastProcessedMessageWasQueued { get; set; }
+
+    #endregion
+
+    #region Synchronized Properties
+
+    public bool IsEnabled
     {
-        #region Private Members
+        get { lock (_sync) { return _isEnabled; } }
+        set { lock (_sync) { _isEnabled = value; } }
+    }
 
-        private object sync_ = new object();
-        private bool isEnabled_ = true;
-        private bool receivedLogon_ = false;
-        private bool receivedReset_ = false;
-        private bool sentLogon_ = false;
-        private bool sentLogout_ = false;
-        private bool sentReset_ = false;
-        private string logoutReason_ = "";
-        private int testRequestCounter_ = 0;
-        private int heartBtInt_ = 0;
-        private int heartBtIntAsMilliSecs_ = 0;
-        private DateTime lastReceivedTimeDT_ = DateTime.MinValue;
-        private DateTime lastSentTimeDT_ = DateTime.MinValue;
-        private int logonTimeout_ = 10;
-        private long logonTimeoutAsMilliSecs_ = 10 * 1000;
-        private int logoutTimeout_ = 2;
-        private long logoutTimeoutAsMilliSecs_ = 2 * 1000;
-        private ResendRange resendRange_ = new ResendRange();
-        private Dictionary<int, Message> msgQueue = new Dictionary<int, Message>();
+    public bool ReceivedLogon
+    {
+        get { lock (_sync) { return _receivedLogon; } }
+        set { lock (_sync) { _receivedLogon = value; } }
+    }
 
-        private ILog log_;
+    public bool ReceivedReset
+    {
+        get { lock (_sync) { return _receivedReset; } }
+        set { lock (_sync) { _receivedReset = value; } }
+    }
 
-        #endregion
+    public bool SentLogon
+    {
+        get { lock (_sync) { return _sentLogon; } }
+        set { lock (_sync) { _sentLogon = value; } }
+    }
 
-        #region Unsynchronized Properties
+    public bool SentLogout
+    {
+        get { lock (_sync) { return _sentLogout; } }
+        set { lock (_sync) { _sentLogout = value; } }
+    }
 
-        public IMessageStore MessageStore
-        { get; set; }
+    public bool SentReset
+    {
+        get { lock (_sync) { return _sentReset; } }
+        set { lock (_sync) { _sentReset = value; } }
+    }
 
-        public bool IsInitiator
-        { get; set; }
+    public string LogoutReason
+    {
+        get { lock (_sync) { return _logoutReason; } }
+        set { lock (_sync) { _logoutReason = value; } }
+    }
 
-        public bool ShouldSendLogon
-        { get { return IsInitiator && !SentLogon; } }
+    public int TestRequestCounter
+    {
+        get { lock (_sync) { return _testRequestCounter; } }
+        set { lock (_sync) { _testRequestCounter = value; } }
+    }
 
-        public ILog Log
-        { get { return log_; } }
+    public int HeartBtInt
+    {
+        get { lock (_sync) { return _heartBtInt; } }
+        set { lock (_sync) { _heartBtInt = value; _heartBtIntAsMilliSecs = 1000 * value; } }
+    }
 
-        #endregion
+    public int HeartBtIntAsMilliSecs
+    {
+        get { lock (_sync) { return _heartBtIntAsMilliSecs; } }
+    }
 
-        #region Synchronized Properties
+    public DateTime LastReceivedTimeDT
+    {
+        get { lock (_sync) { return _lastReceivedTimeDt; } }
+        set { lock (_sync) { _lastReceivedTimeDt = value; } }
+    }
 
-        public bool IsEnabled
+
+    public DateTime LastSentTimeDT
+    {
+        get { lock (_sync) { return _lastSentTimeDt; } }
+        set { lock (_sync) { _lastSentTimeDt = value; } }
+    }
+
+    public int LogonTimeout
+    {
+        get { lock (_sync) { return _logonTimeout; } }
+        set { lock (_sync) { _logonTimeout = value; _logonTimeoutAsMilliSecs = 1000 * value; } }
+    }
+
+    public long LogonTimeoutAsMilliSecs
+    {
+        get { lock (_sync) { return _logonTimeoutAsMilliSecs; } }
+    }
+
+    public int LogoutTimeout
+    {
+        get { lock (_sync) { return _logoutTimeout; } }
+        set { lock (_sync) { _logoutTimeout = value; _logoutTimeoutAsMilliSecs = 1000 * value; } }
+    }
+
+    public long LogoutTimeoutAsMilliSecs
+    {
+        get { lock (_sync) { return _logoutTimeoutAsMilliSecs; } }
+    }
+
+    private MessagesBySeqNum MsgQueue
+    {
+        get { lock (_sync) { return _msgQueue; } }
+        set { lock (_sync) { _msgQueue = value; } }
+    }
+
+    #endregion
+
+    internal SessionState(bool isInitiator, ILogger logger, int heartBtInt, IMessageStore messageStore)
+    {
+        Log = logger;
+        HeartBtInt = heartBtInt;
+        IsInitiator = isInitiator;
+        _lastReceivedTimeDt = DateTime.UtcNow;
+        _lastSentTimeDt = DateTime.UtcNow;
+        MessageStore = messageStore;
+    }
+
+    /// <summary>
+    /// All time args are in milliseconds
+    /// </summary>
+    /// <param name="now">current system time</param>
+    /// <param name="lastReceivedTime">last received time</param>
+    /// <param name="logonTimeout">number of milliseconds to wait for a Logon from the counterparty</param>
+    /// <returns></returns>
+    public static bool LogonTimedOut(DateTime now, long logonTimeout, DateTime lastReceivedTime)
+    {
+        return now.Subtract(lastReceivedTime).TotalMilliseconds >= logonTimeout;
+    }
+    public bool LogonTimedOut()
+    {
+        return LogonTimedOut(DateTime.UtcNow, LogonTimeoutAsMilliSecs, LastReceivedTimeDT);
+    }
+
+    /// <summary>
+    /// All time args are in milliseconds
+    /// </summary>
+    /// <param name="now">current system datetime</param>
+    /// <param name="heartBtIntMillis">heartbeat interval in milliseconds</param>
+    /// <param name="lastReceivedTime">last received datetime</param>
+    /// <returns>true if timed out</returns>
+    public static bool TimedOut(DateTime now, int heartBtIntMillis, DateTime lastReceivedTime)
+    {
+        double elapsed = now.Subtract(lastReceivedTime).TotalMilliseconds;
+        return elapsed >= (2.4 * heartBtIntMillis);
+    }
+    public bool TimedOut()
+    {
+        return TimedOut(DateTime.UtcNow, HeartBtIntAsMilliSecs, LastReceivedTimeDT);
+    }
+
+    /// <summary>
+    /// All time args are in milliseconds
+    /// </summary>
+    /// <param name="now">current system time</param>
+    /// <param name="sentLogout">true if a Logout has been sent to the counterparty, otherwise false</param>
+    /// <param name="logoutTimeout">number of milliseconds to wait for a Logout from the counterparty</param>
+    /// <param name="lastSentTime">last sent time</param>
+    /// <returns></returns>
+    public static bool LogoutTimedOut(DateTime now, bool sentLogout, long logoutTimeout, DateTime lastSentTime)
+    {
+        return sentLogout && (now.Subtract(lastSentTime).TotalMilliseconds >= logoutTimeout);
+    }
+    public bool LogoutTimedOut()
+    {
+        return LogoutTimedOut(DateTime.UtcNow, SentLogout, LogoutTimeoutAsMilliSecs, LastSentTimeDT);
+    }
+
+    /// <summary>
+    /// All time args are in milliseconds
+    /// </summary>
+    /// <param name="now">current system time</param>
+    /// <param name="heartBtIntMillis">heartbeat interval in milliseconds</param>
+    /// <param name="lastReceivedTime">last received time</param>
+    /// <param name="testRequestCounter">test request counter</param>
+    /// <returns>true if test request is needed</returns>
+    public static bool NeedTestRequest(DateTime now, int heartBtIntMillis, DateTime lastReceivedTime, int testRequestCounter)
+    {
+        double elapsedMilliseconds = now.Subtract(lastReceivedTime).TotalMilliseconds;
+        return elapsedMilliseconds >= (1.2 * ((testRequestCounter + 1) * heartBtIntMillis));
+    }
+    public bool NeedTestRequest()
+    {
+        return NeedTestRequest(DateTime.UtcNow, HeartBtIntAsMilliSecs, LastReceivedTimeDT, TestRequestCounter);
+    }
+
+    /// <summary>
+    /// All time args are in milliseconds
+    /// </summary>
+    /// <param name="now">current system time</param>
+    /// <param name="heartBtIntMillis">heartbeat interval in milliseconds</param>
+    /// <param name="lastSentTime">last sent time</param>
+    /// <param name="testRequestCounter">test request counter</param>
+    /// <returns>true if heartbeat is needed</returns>
+    public static bool NeedHeartbeat(DateTime now, int heartBtIntMillis, DateTime lastSentTime, int testRequestCounter)
+    {
+        double elapsed = now.Subtract(lastSentTime).TotalMilliseconds;
+        return (elapsed >= Convert.ToDouble(heartBtIntMillis)) && (0 == testRequestCounter);
+    }
+    public bool NeedHeartbeat()
+    {
+        return NeedHeartbeat(DateTime.UtcNow, HeartBtIntAsMilliSecs, LastSentTimeDT, TestRequestCounter);
+    }
+
+    /// <summary>
+    /// All time args are in milliseconds
+    /// </summary>
+    /// <param name="now">current system time</param>
+    /// <param name="heartBtIntMillis">heartbeat interval in milliseconds</param>
+    /// <param name="lastSentTime">last sent time</param>
+    /// <param name="lastReceivedTime">last received time</param>
+    /// <returns>true if within heartbeat interval</returns>
+    public static bool WithinHeartbeat(DateTime now, int heartBtIntMillis, DateTime lastSentTime, DateTime lastReceivedTime)
+    {
+        return (now.Subtract(lastSentTime).TotalMilliseconds < Convert.ToDouble(heartBtIntMillis))
+            && (now.Subtract(lastReceivedTime).TotalMilliseconds < Convert.ToDouble(heartBtIntMillis));
+    }
+    public bool WithinHeartbeat()
+    {
+        return WithinHeartbeat(DateTime.UtcNow, HeartBtIntAsMilliSecs, LastSentTimeDT, LastReceivedTimeDT);
+    }
+
+    public ResendRange GetResendRange()
+    {
+        return _resendRange;
+    }
+
+    public void Get(SeqNumType begSeqNo, SeqNumType endSeqNo, List<string> messages)
+    {
+        lock (_sync)
         {
-            get { lock (sync_) { return isEnabled_; } }
-            set { lock (sync_) { isEnabled_ = value; } }
-        }
-
-        public bool ReceivedLogon
-        {
-            get { lock (sync_) { return receivedLogon_; } }
-            set { lock (sync_) { receivedLogon_ = value; } }
-        }
-
-        public bool ReceivedReset
-        {
-            get { lock (sync_) { return receivedReset_; } }
-            set { lock (sync_) { receivedReset_ = value; } }
-        }
-
-        public bool SentLogon
-        {
-            get { lock (sync_) { return sentLogon_; } }
-            set { lock (sync_) { sentLogon_ = value; } }
-        }
-
-        public bool SentLogout
-        {
-            get { lock (sync_) { return sentLogout_; } }
-            set { lock (sync_) { sentLogout_ = value; } }
-        }
-
-        public bool SentReset
-        {
-            get { lock (sync_) { return sentReset_; } }
-            set { lock (sync_) { sentReset_ = value; } }
-        }
-
-        public string LogoutReason
-        {
-            get { lock (sync_) { return logoutReason_; } }
-            set { lock (sync_) { logoutReason_ = value; } }
-        }
-
-        public int TestRequestCounter
-        {
-            get { lock (sync_) { return testRequestCounter_; } }
-            set { lock (sync_) { testRequestCounter_ = value; } }
-        }
-
-        public int HeartBtInt
-        {
-            get { lock (sync_) { return heartBtInt_; } }
-            set { lock (sync_) { heartBtInt_ = value; heartBtIntAsMilliSecs_ = 1000 * value; } }
-        }
-
-        public int HeartBtIntAsMilliSecs
-        {
-            get { lock (sync_) { return heartBtIntAsMilliSecs_; } }
-        }
-
-        public DateTime LastReceivedTimeDT
-        {
-            get { lock (sync_) { return lastReceivedTimeDT_; } }
-            set { lock (sync_) { lastReceivedTimeDT_ = value; } }
-        }
-
-
-        public DateTime LastSentTimeDT
-        {
-            get { lock (sync_) { return lastSentTimeDT_; } }
-            set { lock (sync_) { lastSentTimeDT_ = value; } }
-        }
-
-        public int LogonTimeout
-        {
-            get { lock (sync_) { return logonTimeout_; } }
-            set { lock (sync_) { logonTimeout_ = value; logonTimeoutAsMilliSecs_ = 1000 * value; } }
-        }
-
-        public long LogonTimeoutAsMilliSecs
-        {
-            get { lock (sync_) { return logonTimeoutAsMilliSecs_; } }
-        }
-
-        public int LogoutTimeout
-        {
-            get { lock (sync_) { return logoutTimeout_; } }
-            set { lock (sync_) { logoutTimeout_ = value; logoutTimeoutAsMilliSecs_ = 1000 * value; } }
-        }
-
-        public long LogoutTimeoutAsMilliSecs
-        {
-            get { lock (sync_) { return logoutTimeoutAsMilliSecs_; } }
-        }
-
-        private Dictionary<int, Message> MsgQueue
-        {
-            get { lock (sync_) { return msgQueue; } }
-            set { lock (sync_) { msgQueue = value; } }
-        }
-
-        #endregion
-
-        public SessionState(ILog log, int heartBtInt)
-        {
-            log_ = log;
-            this.HeartBtInt = heartBtInt;
-            this.IsInitiator = (0 != heartBtInt);
-            lastReceivedTimeDT_ = DateTime.UtcNow;
-            lastSentTimeDT_ = DateTime.UtcNow;
-        }
-
-        /// <summary>
-        /// All time args are in milliseconds
-        /// </summary>
-        /// <param name="now">current system time</param>
-        /// <param name="lastReceivedTime">last received time</param>
-        /// <param name="logonTimeout">number of milliseconds to wait for a Logon from the counterparty</param>
-        /// <returns></returns>
-        public static bool LogonTimedOut(DateTime now, long logonTimeout, DateTime lastReceivedTime)
-        {
-            return (now.Subtract(lastReceivedTime).TotalMilliseconds) >= logonTimeout;
-        }
-        public bool LogonTimedOut()
-        {
-            return LogonTimedOut(DateTime.UtcNow, this.LogonTimeoutAsMilliSecs, this.LastReceivedTimeDT);
-        }
-
-        /// <summary>
-        /// All time args are in milliseconds
-        /// </summary>
-        /// <param name="now">current system datetime</param>
-        /// <param name="heartBtIntMillis">heartbeat interval in milliseconds</param>
-        /// <param name="lastReceivedTime">last received datetime</param>
-        /// <returns>true if timed out</returns>
-        public static bool TimedOut(DateTime now, int heartBtIntMillis, DateTime lastReceivedTime)
-        {
-            double elapsed = now.Subtract(lastReceivedTime).TotalMilliseconds;
-            return elapsed >= (2.4 * heartBtIntMillis);
-        }
-        public bool TimedOut()
-        {
-            return TimedOut(DateTime.UtcNow, this.HeartBtIntAsMilliSecs, this.LastReceivedTimeDT);
-        }
-
-        /// <summary>
-        /// All time args are in milliseconds
-        /// </summary>
-        /// <param name="now">current system time</param>
-        /// <param name="sentLogout">true if a Logout has been sent to the counterparty, otherwise false</param>
-        /// <param name="logoutTimeout">number of milliseconds to wait for a Logout from the counterparty</param>
-        /// <param name="lastSentTime">last sent time</param>
-        /// <returns></returns>
-        public static bool LogoutTimedOut(DateTime now, bool sentLogout, long logoutTimeout, DateTime lastSentTime)
-        {
-            return sentLogout && ((now.Subtract(lastSentTime).TotalMilliseconds) >= logoutTimeout);
-        }
-        public bool LogoutTimedOut()
-        {
-            return LogoutTimedOut(DateTime.UtcNow, this.SentLogout, this.LogoutTimeoutAsMilliSecs, this.LastSentTimeDT);
-        }
-
-        /// <summary>
-        /// All time args are in milliseconds
-        /// </summary>
-        /// <param name="now">current system time</param>
-        /// <param name="heartBtIntMillis">heartbeat interval in milliseconds</param>
-        /// <param name="lastReceivedTime">last received time</param>
-        /// <param name="testRequestCounter">test request counter</param>
-        /// <returns>true if test request is needed</returns>
-        public static bool NeedTestRequest(DateTime now, int heartBtIntMillis, DateTime lastReceivedTime, int testRequestCounter)
-        {
-            double elapsedMilliseconds = now.Subtract(lastReceivedTime).TotalMilliseconds;
-            return elapsedMilliseconds >= (1.2 * ((testRequestCounter + 1) * heartBtIntMillis));
-        }
-        public bool NeedTestRequest()
-        {
-            return NeedTestRequest(DateTime.UtcNow, this.HeartBtIntAsMilliSecs, this.LastReceivedTimeDT, this.TestRequestCounter);
-        }
-
-        /// <summary>
-        /// All time args are in milliseconds
-        /// </summary>
-        /// <param name="now">current system time</param>
-        /// <param name="heartBtIntMillis">heartbeat interval in milliseconds</param>
-        /// <param name="lastSentTime">last sent time</param>
-        /// <param name="testRequestCounter">test request counter</param>
-        /// <returns>true if heartbeat is needed</returns>
-        public static bool NeedHeartbeat(DateTime now, int heartBtIntMillis, DateTime lastSentTime, int testRequestCounter)
-        {
-            double elapsed = now.Subtract(lastSentTime).TotalMilliseconds;
-            return (elapsed >= Convert.ToDouble(heartBtIntMillis)) && (0 == testRequestCounter);
-        }
-        public bool NeedHeartbeat()
-        {
-            return NeedHeartbeat(DateTime.UtcNow, this.HeartBtIntAsMilliSecs, this.LastSentTimeDT, this.TestRequestCounter);
-        }
-
-        /// <summary>
-        /// All time args are in milliseconds
-        /// </summary>
-        /// <param name="now">current system time</param>
-        /// <param name="heartBtIntMillis">heartbeat interval in milliseconds</param>
-        /// <param name="lastSentTime">last sent time</param>
-        /// <param name="lastReceivedTime">last received time</param>
-        /// <returns>true if within heartbeat interval</returns>
-        public static bool WithinHeartbeat(DateTime now, int heartBtIntMillis, DateTime lastSentTime, DateTime lastReceivedTime)
-        {
-            return ((now.Subtract(lastSentTime).TotalMilliseconds) < Convert.ToDouble(heartBtIntMillis))
-                && ((now.Subtract(lastReceivedTime).TotalMilliseconds) < Convert.ToDouble(heartBtIntMillis));
-        }
-        public bool WithinHeartbeat()
-        {
-            return WithinHeartbeat(DateTime.UtcNow, this.HeartBtIntAsMilliSecs, this.LastSentTimeDT, this.LastReceivedTimeDT);
-        }
-
-        public ResendRange GetResendRange()
-        {
-            return resendRange_;
-        }
-
-        public void Get(int begSeqNo, int endSeqNo, List<string> messages)
-        {
-            lock (sync_)
-            {
-              MessageStore.Get(begSeqNo, endSeqNo, messages);
-            }
-        }
-
-        public void SetResendRange(int begin, int end)
-        {
-            SetResendRange(begin, end, -1);
-        }
-
-        public void SetResendRange(int begin, int end, int chunkEnd)
-        {
-            resendRange_.BeginSeqNo = begin;
-            resendRange_.EndSeqNo = end;
-            resendRange_.ChunkEndSeqNo = chunkEnd == -1 ? end : chunkEnd;
-        }
-
-        public bool ResendRequested()
-        {
-            return !(resendRange_.BeginSeqNo == 0 && resendRange_.EndSeqNo == 0);
-        }
-
-        public void Queue(int msgSeqNum, Message msg)
-        {
-            MsgQueue.Add(msgSeqNum, msg);
-        }
-
-        public void ClearQueue()
-        {
-            MsgQueue.Clear();
-        }
-
-        public QuickFix.Message Dequeue(int num)
-        {
-            if (MsgQueue.ContainsKey(num))
-            {
-                QuickFix.Message msg = MsgQueue[num];
-                MsgQueue.Remove(num);
-                return msg;
-            }
-            return null;
-        }
-
-        public Message Retrieve(int msgSeqNum)
-        {
-            Message msg = null;
-            if (MsgQueue.ContainsKey(msgSeqNum))
-            {
-                msg = MsgQueue[msgSeqNum];
-                MsgQueue.Remove(msgSeqNum);
-            }
-            return msg;
-        }
-
-        /// <summary>
-        /// All time values are displayed in milliseconds.
-        /// </summary>
-        /// <returns>a string that represents the session state</returns>
-        public override string ToString()
-        {
-            return new System.Text.StringBuilder("SessionState ")
-                .Append("[ Now=").Append(DateTime.UtcNow)
-                .Append(", HeartBtInt=").Append(this.HeartBtIntAsMilliSecs)
-                .Append(", LastSentTime=").Append(this.LastSentTimeDT)
-                .Append(", LastReceivedTime=").Append(this.LastReceivedTimeDT)
-                .Append(", TestRequestCounter=").Append(this.TestRequestCounter)
-                .Append(", WithinHeartbeat=").Append(WithinHeartbeat())
-                .Append(", NeedHeartbeat=").Append(NeedHeartbeat())
-                .Append(", NeedTestRequest=").Append(NeedTestRequest())
-                .Append(", ResendRange=").Append(GetResendRange())
-                .Append(" ]").ToString();
-
-        }
-
-        #region MessageStore-manipulating Members
-
-        public bool Set(int msgSeqNum, string msg)
-        {
-            lock (sync_) { return this.MessageStore.Set(msgSeqNum, msg); }
-        }
-
-        public int GetNextSenderMsgSeqNum()
-        {
-            lock (sync_) { return this.MessageStore.GetNextSenderMsgSeqNum(); }
-        }
-
-        public int GetNextTargetMsgSeqNum()
-        {
-            lock (sync_) { return this.MessageStore.GetNextTargetMsgSeqNum(); }
-        }
-
-        public void SetNextSenderMsgSeqNum(int value)
-        {
-            lock (sync_) { this.MessageStore.SetNextSenderMsgSeqNum(value); }
-        }
-
-        public void SetNextTargetMsgSeqNum(int value)
-        {
-            lock (sync_) { this.MessageStore.SetNextTargetMsgSeqNum(value); }
-        }
-
-        public void IncrNextSenderMsgSeqNum()
-        {
-            lock (sync_) { this.MessageStore.IncrNextSenderMsgSeqNum(); }
-        }
-
-        public void IncrNextTargetMsgSeqNum()
-        {
-            lock (sync_) { this.MessageStore.IncrNextTargetMsgSeqNum(); }
-        }
-
-        public System.DateTime? CreationTime
-        {
-            get
-            {
-                lock (sync_) { return this.MessageStore.CreationTime; }
-            }
-        }
-
-        [Obsolete("Use Reset(reason) instead.")]
-        public void Reset()
-        {
-            this.Reset("(unspecified reason)");
-        }
-        
-        public void Reset(string reason)
-        {
-            lock (sync_)
-            {
-                this.MessageStore.Reset();
-                this.Log.OnEvent("Session reset: " + reason);
-            }
-        }
-
-        public void Refresh()
-        {
-            lock (sync_) { this.MessageStore.Refresh(); }
-        }
-
-        #endregion
-
-        public void Dispose()
-        {
-            if (log_ != null) { log_.Dispose(); }
-            if (MessageStore != null) { MessageStore.Dispose(); }
+          MessageStore.Get(begSeqNo, endSeqNo, messages);
         }
     }
-}
 
+    public void SetResendRange(
+        SeqNumType begin, SeqNumType end, SeqNumType trigger,
+        Message resendRequest, SeqNumType chunkEnd = ResendRange.NOT_SET)
+    {
+        _resendRange.Set(begin, end, trigger, resendRequest, chunkEnd);
+    }
+
+    internal void ResetResendRange()
+    {
+        _resendRange.Reset();
+    }
+
+    public bool IsResendRequested()
+    {
+        return !(_resendRange.BeginSeqNo == 0 && _resendRange.EndSeqNo == 0);
+    }
+
+    public void Queue(SeqNumType msgSeqNum, Message msg)
+    {
+        MsgQueue.TryAdd(msgSeqNum, msg);
+    }
+
+    public void ClearQueue()
+    {
+        MsgQueue.Clear();
+    }
+
+    public QuickFix.Message? Dequeue(SeqNumType num)
+    {
+        return MsgQueue.Remove(num, out Message? msg) ? msg : null;
+    }
+
+    public Message? Retrieve(SeqNumType msgSeqNum)
+    {
+        return MsgQueue.Remove(msgSeqNum, out Message? msg) ? msg : null;
+    }
+
+    /// <summary>
+    /// All time values are displayed in milliseconds.
+    /// </summary>
+    /// <returns>a string that represents the session state</returns>
+    public override string ToString()
+    {
+        return new System.Text.StringBuilder("SessionState ")
+            .Append("[ Now=").Append(DateTime.UtcNow)
+            .Append(", HeartBtInt=").Append(HeartBtIntAsMilliSecs)
+            .Append(", LastSentTime=").Append(LastSentTimeDT)
+            .Append(", LastReceivedTime=").Append(LastReceivedTimeDT)
+            .Append(", TestRequestCounter=").Append(TestRequestCounter)
+            .Append(", WithinHeartbeat=").Append(WithinHeartbeat())
+            .Append(", NeedHeartbeat=").Append(NeedHeartbeat())
+            .Append(", NeedTestRequest=").Append(NeedTestRequest())
+            .Append(", ResendRange=").Append(GetResendRange())
+            .Append(" ]").ToString();
+
+    }
+
+    #region MessageStore-manipulating Members
+
+    public bool Set(SeqNumType msgSeqNum, string msg)
+    {
+        lock (_sync) { return MessageStore.Set(msgSeqNum, msg); }
+    }
+
+    public SeqNumType NextSenderMsgSeqNum
+    {
+        get { lock (_sync) { return MessageStore.NextSenderMsgSeqNum; } }
+        set { lock (_sync) { MessageStore.NextSenderMsgSeqNum = value; } }
+    }
+
+    public SeqNumType NextTargetMsgSeqNum
+    {
+        get { lock (_sync) { return MessageStore.NextTargetMsgSeqNum; } }
+        set { lock (_sync) { MessageStore.NextTargetMsgSeqNum = value; } }
+    }
+
+    public void IncrNextSenderMsgSeqNum()
+    {
+        lock (_sync) { MessageStore.IncrNextSenderMsgSeqNum(); }
+    }
+
+    public void IncrNextTargetMsgSeqNum()
+    {
+        lock (_sync) { MessageStore.IncrNextTargetMsgSeqNum(); }
+    }
+
+    public bool SetAndIncrNextSenderMsgSeqNum(SeqNumType msgSeqNum, string msg)
+    {
+        lock (_sync) { return MessageStore.SetAndIncrNextSenderMsgSeqNum(msgSeqNum, msg); }
+    }
+
+    public DateTime? CreationTime
+    {
+        get
+        {
+            lock (_sync) { return MessageStore.CreationTime; }
+        }
+    }
+
+    /// <summary>
+    /// Reset the MessageStore
+    /// </summary>
+    /// <param name="reason">this is for the log statement</param>
+    public void Reset(string reason)
+    {
+        lock (_sync)
+        {
+            MessageStore.Reset();
+            Log.Log(LogLevel.Information, "Session reset: {Reason}", reason);
+        }
+    }
+
+    public void Refresh()
+    {
+        lock (_sync) { MessageStore.Refresh(); }
+    }
+
+    #endregion
+
+    public void Dispose()
+    {
+        Dispose(true);
+        GC.SuppressFinalize(this);
+    }
+
+    private bool _disposed = false;
+    protected virtual void Dispose(bool disposing)
+    {
+        if (_disposed) return;
+        if (disposing)
+        {
+            MessageStore.Dispose();
+        }
+        _disposed = true;
+    }
+
+    ~SessionState() => Dispose(false);
+}

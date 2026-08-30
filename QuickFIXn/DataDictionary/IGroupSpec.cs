@@ -1,12 +1,11 @@
 ﻿using System;
 
-namespace QuickFix.DataDictionary
+namespace QuickFix.DataDictionary;
+
+public interface IGroupSpec : IFieldMapSpec
 {
-    public interface IGroupSpec : IFieldMapSpec
-    {
-        /// <summary>
-        /// The tag of the delimiter field, i.e. the first field of each group member
-        /// </summary>
-        int Delim { get; set; }
-    }
+    /// <summary>
+    /// The tag of the delimiter field, i.e. the first field of each group member
+    /// </summary>
+    int Delim { get; set; }
 }

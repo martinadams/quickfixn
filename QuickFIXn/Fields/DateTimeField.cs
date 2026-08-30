@@ -1,64 +1,29 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+using QuickFix.Fields.Converters;
 
-namespace QuickFix.Fields
+namespace QuickFix.Fields;
+
+public class DateTimeField : FieldBase<DateTime>
 {
-    public class DateTimeField : FieldBase<DateTime>
+    protected readonly TimePrecision TimePrecision = TimePrecision.Millisecond;
+
+    public DateTimeField(int tag)
+        : base(tag, new DateTime()) {}
+
+    public DateTimeField(int tag, DateTime dt)
+        : base(tag, dt) {}
+
+    public DateTimeField(int tag, DateTime dt, bool showMilliseconds)
+        : this(tag, dt, showMilliseconds ? TimePrecision.Millisecond : TimePrecision.Second ) { }
+
+    public DateTimeField(int tag, DateTime dt, TimePrecision timeFormatPrecision)
+        : base(tag, dt)
     {
-        protected readonly bool showMilliseconds = true;
-        public DateTimeField(int tag)
-            : base(tag, new DateTime()) {}
-
-        public DateTimeField(int tag, DateTime dt)
-            : base(tag, dt) {}
-
-        public DateTimeField(int tag, DateTime dt, bool showMilliseconds)
-            : base(tag, dt) { this.showMilliseconds = showMilliseconds; }
-
-        // quickfix compat
-        public DateTime getValue()
-        { return Obj; }
-
-        public void setValue(DateTime dt)
-        { Obj = dt; }
-
-        protected override string makeString()
-        {
-            return Converters.DateTimeConverter.Convert(Obj, showMilliseconds);
-        }
+        TimePrecision = timeFormatPrecision;
     }
 
-    public class DateOnlyField : DateTimeField
+    protected override string MakeString()
     {
-        public DateOnlyField(int tag)
-            : base(tag, new DateTime()) { }
-
-        public DateOnlyField(int tag, DateTime dt)
-            : base(tag, dt) { }
-
-        public DateOnlyField(int tag, DateTime dt, bool showMilliseconds)
-            : base(tag, dt, showMilliseconds) { }
-        protected override string makeString()
-        {
-            return Converters.DateTimeConverter.ConvertDateOnly(Obj);
-        }
-    }
-
-    public class TimeOnlyField : DateTimeField
-    {
-        public TimeOnlyField(int tag)
-            : base(tag, new DateTime()) { }
-
-        public TimeOnlyField(int tag, DateTime dt)
-            : base(tag, dt) { }
-
-        public TimeOnlyField(int tag, DateTime dt, bool showMilliseconds)
-            : base(tag, dt, showMilliseconds) { }
-        protected override string makeString()
-        {
-            return Converters.DateTimeConverter.ConvertTimeOnly(Obj, base.showMilliseconds); 
-        }
+        return DateTimeConverter.ToFIX(Value, TimePrecision);
     }
 }

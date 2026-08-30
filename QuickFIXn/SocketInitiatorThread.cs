@@ -1,206 +1,206 @@
-﻿using System.Net.Sockets;
-using System.Net;
-using System.Threading;
-using System.IO;
-using System;
+﻿using System;
 using System.Diagnostics;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using QuickFix.Logger;
 
-namespace QuickFix
+namespace QuickFix;
+
+/// <summary>
+/// Handles a connection with an acceptor.
+/// </summary>
+public class SocketInitiatorThread : IResponder
 {
+    public Session Session { get; }
+    public Transport.SocketInitiator Initiator { get; }
+    public ILogger NonSessionLog { get; }
+
+    public const int BUF_SIZE = 512;
+
+    private Thread? _thread;
+    private readonly byte[] _readBuffer = new byte[BUF_SIZE];
+    private readonly Parser _parser = new();
+    private Stream? _stream;
+    private readonly CancellationTokenSource _readCancellationTokenSource = new();
+    private readonly IPEndPoint _socketEndPoint;
+    private readonly SocketSettings _socketSettings;
+    private readonly IQuickFixLoggerFactory _loggerFactory;
+
     /// <summary>
-    /// Handles a connection with an acceptor.
+    /// Keep a task for handling async read
     /// </summary>
-    public class SocketInitiatorThread : IResponder
+    private Task<int>? _currentReadTask;
+
+    internal SocketInitiatorThread(
+        Transport.SocketInitiator initiator,
+        Session session,
+        IPEndPoint socketEndPoint,
+        SocketSettings socketSettings,
+        IQuickFixLoggerFactory loggerFactory)
     {
-        public Session Session { get { return session_; } }
-        public Transport.SocketInitiator Initiator { get { return initiator_; } }
+        Initiator = initiator;
+        Session = session;
+        _loggerFactory = loggerFactory;
+        NonSessionLog = _loggerFactory.CreateNonSessionLogger<SocketInitiatorThread>();
+        _socketEndPoint = socketEndPoint;
+        _socketSettings = socketSettings;
+    }
 
-        public const int BUF_SIZE = 512;
+    public void Start()
+    {
+        _thread = new Thread(Transport.SocketInitiator.SocketInitiatorThreadStart);
+        _thread.Start(this);
+    }
 
-        private Thread thread_ = null;
-        private byte[] readBuffer_ = new byte[BUF_SIZE];
-        private Parser parser_;
-        protected Stream stream_;
-        private Transport.SocketInitiator initiator_;
-        private Session session_;
-        private IPEndPoint socketEndPoint_;
-        protected SocketSettings socketSettings_;
-        private bool isDisconnectRequested_ = false;
+    public void Join()
+    {
+        if (_thread is null)
+            return;
+        Disconnect();
+        // Make sure session's socket reader thread doesn't try to do a Join on itself!
+        if (Environment.CurrentManagedThreadId != _thread.ManagedThreadId)
+            _thread.Join(2000);
+        _thread = null;
+    }
 
-        public SocketInitiatorThread(Transport.SocketInitiator initiator, Session session, IPEndPoint socketEndPoint, SocketSettings socketSettings)
+    public void Connect()
+    {
+        Debug.Assert(_stream == null);
+
+        _stream = SetupStream();
+        Session.SetResponder(this);
+    }
+
+    /// <summary>
+    /// Setup/Connect to the other party.
+    /// Override this in order to setup other types of streams with other settings
+    /// </summary>
+    /// <returns>Stream representing the (network)connection to the other party</returns>
+    protected virtual Stream SetupStream()
+    {
+        return Transport.StreamFactory.CreateClientStream(_socketEndPoint, _socketSettings, _loggerFactory);
+    }
+
+    public bool Read()
+    {
+        try
         {
-            isDisconnectRequested_ = false;
-            initiator_ = initiator;
-            session_ = session;
-            socketEndPoint_ = socketEndPoint;
-            parser_ = new Parser();
-            session_ = session;
-            socketSettings_ = socketSettings;
-        }
+            int bytesRead = ReadSome(_readBuffer, 1000);
+            if (bytesRead > 0)
+                _parser.AddToStream(new ReadOnlySpan<byte>(_readBuffer, 0, bytesRead));
+            else
+                Session.Next();
 
-        public void Start()
-        {
-            isDisconnectRequested_ = false;
-            thread_ = new Thread(new ParameterizedThreadStart(Transport.SocketInitiator.SocketInitiatorThreadStart));
-            thread_.Start(this);
-        }
-
-        public void Join()
-        {
-            if (null == thread_)
-                return;
-            Disconnect();
-            // Make sure session's socket reader thread doesn't try to do a Join on itself!
-            if (Thread.CurrentThread.ManagedThreadId != thread_.ManagedThreadId)
-                thread_.Join(2000);
-            thread_ = null;
-        }
-
-        public void Connect()
-        {
-            Debug.Assert(stream_ == null);
-
-            stream_ = SetupStream();
-            session_.SetResponder(this);
-        }
-
-        /// <summary>
-        /// Setup/Connect to the other party.
-        /// Override this in order to setup other types of streams with other settings
-        /// </summary>
-        /// <returns>Stream representing the (network)connection to the other party</returns>
-        protected virtual Stream SetupStream()
-        {
-            return QuickFix.Transport.StreamFactory.CreateClientStream(socketEndPoint_, socketSettings_, session_.Log);
-        }
-
-
-        public bool Read()
-        {
-            try
-            {
-                int bytesRead = ReadSome(readBuffer_, 1000);
-                if (bytesRead > 0)
-                    parser_.AddToStream(System.Text.Encoding.UTF8.GetString(readBuffer_, 0, bytesRead));
-                else if (null != session_)
-                {
-                    session_.Next();
-                }
-                else
-                {
-                    throw new QuickFIXException("Initiator timed out while reading socket");
-                }
-
-                ProcessStream();
-                return true;
-            }
-            catch (System.ObjectDisposedException e)
-            {
-                // this exception means socket_ is already closed when poll() is called
-                if (isDisconnectRequested_ == false)
-                {
-                    // for lack of a better idea, do what the general exception does
-                    if (null != session_)
-                        session_.Disconnect(e.ToString());
-                    else
-                        Disconnect();
-                }
-                return false;                    
-            }
-            catch (System.Exception e)
-            {
-                if (null != session_)
-                    session_.Disconnect(e.ToString());
-                else
-                    Disconnect();
-            }
-            return false;
-        }
-
-        /// <summary>
-        /// Keep a handle to the current outstanding read request (if any)
-        /// </summary>
-        private IAsyncResult currentReadRequest_;
-        /// <summary>
-        /// Reads data from the network into the specified buffer.
-        /// It will wait up to the specified number of milliseconds for data to arrive,
-        /// if no data has arrived after the specified number of milliseconds then the function returns 0
-        /// </summary>
-        /// <param name="buffer">The buffer.</param>
-        /// <param name="timeoutMilliseconds">The timeout milliseconds.</param>
-        /// <returns>The number of bytes read into the buffer</returns>
-        /// <exception cref="System.Net.Sockets.SocketException">On connection reset</exception>
-        protected int ReadSome(byte[] buffer, int timeoutMilliseconds)
-        {
-            // NOTE: THIS FUNCTION IS EXACTLY THE SAME AS THE ONE IN SocketReader any changes here should 
-            // also be performed there
-            try
-            {
-                // Begin read if it is not already started
-                if (currentReadRequest_ == null)
-                    currentReadRequest_ = stream_.BeginRead(buffer, 0, buffer.Length, null, null);
-
-                // Wait for it to complete (given timeout)
-                currentReadRequest_.AsyncWaitHandle.WaitOne(timeoutMilliseconds);
-
-                if (currentReadRequest_.IsCompleted)
-                {
-                    // Make sure to set currentReadRequest_ to before retreiving result 
-                    // so a new read can be started next time even if an exception is thrown
-                    var request = currentReadRequest_;
-                    currentReadRequest_ = null;
-
-                    int bytesRead = stream_.EndRead(request);
-                    if (0 == bytesRead)
-                        throw new SocketException(System.Convert.ToInt32(SocketError.ConnectionReset));
-
-                    return bytesRead;
-                }
-                else
-                    return 0;
-            }
-            catch (System.IO.IOException ex) // Timeout
-            {
-                var inner = ex.InnerException as SocketException;
-                if (inner != null && inner.SocketErrorCode == SocketError.TimedOut)
-                {
-                    // Nothing read 
-                    return 0;
-                }
-                else if (inner != null)
-                {
-                    throw inner; //rethrow SocketException part (which we have exception logic for)
-                }
-                else
-                    throw; //rethrow original exception
-            }
-        }
-
-        private void ProcessStream()
-        {
-            string msg;
-            while (parser_.ReadFixMessage(out msg))
-            {
-                session_.Next(msg);
-            }
-        }
-
-        #region Responder Members
-
-        public bool Send(string data)
-        {
-            byte[] rawData = System.Text.Encoding.UTF8.GetBytes(data);
-            stream_.Write(rawData, 0, rawData.Length);
+            ProcessStream();
             return true;
         }
-
-        public void Disconnect()
+        catch (Exception e)
         {
-            isDisconnectRequested_ = true;
-            if (stream_ != null)
-                stream_.Close();
+            Session.Disconnect(e.ToString()); // also calls this instance's Disconect()
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Reads data from the network into the specified buffer.
+    /// It will wait up to the specified number of milliseconds for data to arrive,
+    /// if no data has arrived after the specified number of milliseconds then the function returns 0
+    /// </summary>
+    /// <param name="buffer">The buffer.</param>
+    /// <param name="timeoutMilliseconds">The timeout milliseconds.</param>
+    /// <returns>The number of bytes read into the buffer</returns>
+    /// <exception cref="System.Net.Sockets.SocketException">On connection reset</exception>
+    protected virtual int ReadSome(byte[] buffer, int timeoutMilliseconds)
+    {
+        if (_stream is null) {
+            throw new ApplicationException("Initiator is not connected (uninitialized stream)");
         }
 
-        #endregion
+        // NOTE: FROM HERE, THIS FUNCTION IS EXACTLY THE SAME AS THE ONE IN SocketReader.
+        // Any changes made here should also be performed there.
+        try
+        {
+            // Begin read if it is not already started
+            _currentReadTask ??= _stream.ReadAsync(buffer, 0, buffer.Length, _readCancellationTokenSource.Token);
+
+            if (_currentReadTask.Wait(timeoutMilliseconds)) {
+                // Dispose/nullify currentReadTask *before* retrieving .Result.
+                //   Accessing .Result can throw an exception, so we need to reset currentReadTask
+                //   first, to set us up for the next read even if an exception is thrown.
+                Task<int>? request = _currentReadTask;
+                _currentReadTask = null;
+
+                int bytesRead = request.Result; // (As mentioned above, this can throw an exception!)
+                if (0 == bytesRead)
+                    throw new SocketException(Convert.ToInt32(SocketError.Shutdown));
+
+                return bytesRead;
+            }
+
+            return 0;
+        }
+        catch (AggregateException ex) // Timeout
+        {
+            _currentReadTask = null;
+
+            if (ex.InnerException is OperationCanceledException) {
+                // Nothing read 
+                return 0;
+            }
+            
+            var ioException = ex.InnerException as IOException;
+            var inner = ioException?.InnerException as SocketException;
+            if (inner is not null && inner.SocketErrorCode == SocketError.TimedOut) {
+                // Nothing read 
+                return 0;
+            }
+
+            if (inner is not null) {
+                throw inner; //rethrow SocketException part (which we have exception logic for)
+            }
+
+            throw; //rethrow original exception
+        }
     }
+
+    private void ProcessStream()
+    {
+        while (_parser.ReadFixMessage(out var msg))
+        {
+            Session.Next(msg);
+        }
+    }
+
+    #region Responder Members
+
+    public bool Send(string data)
+    {
+        if (_stream is null) {
+            throw new ApplicationException("Initiator is not connected (uninitialized stream)");
+        }
+
+        using ValueDisposable _ = CharEncoding.GetBytes(data, out ReadOnlySpan<byte> rawData);
+        _stream.Write(rawData);
+
+        return true;
+    }
+
+    public void Disconnect()
+    {
+        _readCancellationTokenSource.Cancel();
+        _readCancellationTokenSource.Dispose();
+
+        // just wait when read task will be cancelled
+        _currentReadTask?.ContinueWith(_ => { }).Wait(1000);
+        _currentReadTask?.Dispose();
+        _currentReadTask = null;
+        _stream?.Close();
+    }
+
+    #endregion
 }
+

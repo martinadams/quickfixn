@@ -1,788 +1,1055 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Text;
 using QuickFix.Fields;
-using System.Text.RegularExpressions;
+using System.Text.Json;
+using System.Collections.Generic;
+using QuickFix.DataDictionary;
+using DD = QuickFix.DataDictionary.DataDictionary;
+using QuickFix.ObjectPooling;
+using System.IO;
 
-namespace QuickFix
+namespace QuickFix;
+
+/// <summary>
+/// Represents a FIX message
+/// </summary>
+public class Message : FieldMap
 {
-    public class Header : FieldMap
+    public const char SOH = '\u0001';
+
+    /// <summary>
+    /// If message is invalid, then this is set to the tag that caused it
+    /// </summary>
+    private int _invalidField = 0;
+
+    private bool _isValid = false;
+
+    public Header Header { get; }
+    public Trailer Trailer { get; }
+
+    public Message()
     {
-        public int[] HEADER_FIELD_ORDER = { Tags.BeginString, Tags.BodyLength, Tags.MsgType };
-
-        public Header()
-            : base()
-        { }
-
-        public Header(Header src)
-            : base(src)
-        { }
-
-        public override string CalculateString()
-        {
-            return base.CalculateString(new StringBuilder(), HEADER_FIELD_ORDER);
-        }
-
-        public override string CalculateString(StringBuilder sb, int[] preFields)
-        {
-            return base.CalculateString(sb, HEADER_FIELD_ORDER);
-        }
+        Header = new Header();
+        Trailer = new Trailer();
+        _isValid = true;
     }
 
-    public class Trailer : FieldMap
-    {
-        public Trailer()
-            : base()
-        { }
+    public Message(
+        string msgStr,
+        bool validate = true)
+        : this(msgStr, null, null, validate)
+    { }
 
-        public Trailer(Trailer src)
-            : base(src)
-        { }
+    /// <summary>
+    /// </summary>
+    /// <param name="msgstr"></param>
+    /// <param name="transportDict">(if FIX4, transportDict and appDict should be the same)</param>
+    /// <param name="appDict">(if FIX4, transportDict and appDict should be the same)</param>
+    /// <param name="validate"></param>
+    public Message(string msgstr, DD? transportDict, DD? appDict, bool validate)
+        : this()
+    {
+        PopulateHeaderFromMessageString(msgstr, transportDict);
+        if (IsAdmin())
+            FromString(msgstr, validate, transportDict, transportDict, null, false);
+        else
+            FromString(msgstr, validate, transportDict, appDict, null, false);
+    }
+
+    public Message(Message src)
+        : base(src)
+    {
+        Header = new Header(src.Header);
+        Trailer = new Trailer(src.Trailer);
+        _isValid = src._isValid;
+        _invalidField = src._invalidField;
+    }
+
+    #region Static Methods
+
+    public static bool IsAdminMsgType(string msgType)
+    {
+        return msgType.Length == 1 && "0A12345n".Contains(msgType[0]);
     }
 
     /// <summary>
-    /// Represents a FIX message
+    /// Parse the message type (tag 35) from a FIX string
     /// </summary>
-    public class Message : FieldMap
+    /// <param name="fixstring">the FIX string to parse</param>
+    /// <returns>the message type as a MsgType object</returns>
+    /// <exception cref="MessageParseError">if 35 tag is missing or malformed</exception>
+    public static MsgType IdentifyType(string fixstring)
     {
-        public const string SOH = "\u0001";
-        private int field_ = 0;
-        private bool validStructure_;
-        
-        #region Properties
+        return new MsgType(GetMsgType(fixstring));
+    }
 
-        public Header Header { get; private set; }
-        public Trailer Trailer { get; private set; }
-        
-        #endregion
+    public static int ExtractFieldTag(string msgstr, int pos)
+    {
+        int tagend = msgstr.IndexOf('=', pos);
+        int tag = Convert.ToInt32(msgstr.Substring(pos, tagend - pos));
+        return tag;
+    }
 
-        #region Constructors
-
-        public Message()
+    /// <summary>
+    /// Extract a field whose length is determined by a datalength field
+    /// </summary>
+    /// <param name="msgstr"></param>
+    /// <param name="dataLength"></param>
+    /// <param name="pos"></param>
+    /// <returns></returns>
+    /// <exception cref="MessageParseError"></exception>
+    public static StringField ExtractDataField(string msgstr, int dataLength, ref int pos)
+    {
+        try
         {
-            this.Header = new Header();
-            this.Trailer = new Trailer();
-            this.validStructure_ = true;
+            int tagend = msgstr.IndexOf('=', pos);
+            int tag = Convert.ToInt32(msgstr.Substring(pos, tagend - pos));
+            pos = tagend + 1;
+            StringField field = new StringField(tag, msgstr.Substring(pos, dataLength));
+
+            pos += dataLength + 1;
+            return field;
         }
-
-        public Message(string msgstr)
-            : this(msgstr, true)
-        { }
-
-        public Message(string msgstr, bool validate)
-            : this(msgstr, null, null, validate)
-        {  }
-
-        public Message(string msgstr, DataDictionary.DataDictionary dataDictionary, bool validate)
-            : this()
+        catch (ArgumentOutOfRangeException e)
         {
-            FromString(msgstr, validate, dataDictionary, dataDictionary, null);
+            throw new MessageParseError($"Error at position ({pos}) while parsing msg ({msgstr})", e);
         }
-
-        public Message(string msgstr, DataDictionary.DataDictionary sessionDataDictionary, DataDictionary.DataDictionary appDD, bool validate)
-            : this()
+        catch (OverflowException e)
         {
-            FromStringHeader(msgstr);
-            if(IsAdmin())
-                FromString(msgstr, validate, sessionDataDictionary, sessionDataDictionary, null);
-            else
-                FromString(msgstr, validate, sessionDataDictionary, appDD, null);
+            throw new MessageParseError($"Error at position ({pos}) while parsing msg ({msgstr})", e);
         }
-
-        public Message(Message src)
-            : base(src)
+        catch (FormatException e)
         {
-            this.Header = new Header(src.Header);
-            this.Trailer = new Trailer(src.Trailer);
-            this.validStructure_ = src.validStructure_;
-            this.field_= src.field_;
+            throw new MessageParseError($"Error at position ({pos}) while parsing msg ({msgstr})", e);
         }
+    }
 
-        #endregion
-
-        #region Static Methods
-
-        public static bool IsAdminMsgType(string msgType)
+    /// <summary>
+    /// Extract a field that ends with SOH
+    /// </summary>
+    /// <param name="msgstr"></param>
+    /// <param name="pos"></param>
+    /// <returns></returns>
+    /// <exception cref="MessageParseError"></exception>
+    public static StringField ExtractField(string msgstr, ref int pos)
+    {
+        try
         {
-            return msgType.Length == 1 && "0A12345n".IndexOf(msgType) != -1;
+            int tagend = msgstr.IndexOf('=', pos);
+            int tag = Convert.ToInt32(msgstr.Substring(pos, tagend - pos));
+            pos = tagend + 1;
+            int fieldvalend = msgstr.IndexOf(SOH, pos);
+            StringField field =  new StringField(tag, msgstr.Substring(pos, fieldvalend - pos));
+
+            pos = fieldvalend + 1;
+            return field;
         }
-
-        /// <summary>
-        /// Parse the message type (tag 35) from a FIX string
-        /// </summary>
-        /// <param name="fixstring">the FIX string to parse</param>
-        /// <returns>the message type as a MsgType object</returns>
-        /// <exception cref="MessageParseError">if 35 tag is missing or malformed</exception>
-        public static MsgType IdentifyType(string fixstring)
+        catch (ArgumentOutOfRangeException e)
         {
-            return new MsgType(GetMsgType(fixstring));
+            throw new MessageParseError("Error at position (" + pos + ") while parsing msg (" + msgstr + ")", e);
         }
-
-        public static StringField ExtractField(string msgstr, ref int pos, DataDictionary.DataDictionary sessionDD, DataDictionary.DataDictionary appDD)
+        catch (OverflowException e)
         {
-            try
-            {
-                int tagend = msgstr.IndexOf("=", pos);
-                int tag = Convert.ToInt32(msgstr.Substring(pos, tagend - pos));
-                pos = tagend + 1;
-                int fieldvalend = msgstr.IndexOf("\u0001", pos);
-                StringField field =  new StringField(tag, msgstr.Substring(pos, fieldvalend - pos));
-
-                /** TODO data dict stuff
-                if (((null != sessionDD) && sessionDD.IsDataField(field.Tag)) || ((null != appDD) && appDD.IsDataField(field.Tag)))
-                {
-                    string fieldLength = "";
-                    // Assume length field is 1 less
-                    int lenField = field.Tag - 1;
-                    // Special case for Signature which violates above assumption
-                    if (Tags.Signature.Equals(field.Tag))
-                        lenField = Tags.SignatureLength;
-
-                    if ((null != group) && group.isSetField(lenField))
-                    {
-                        fieldLength = group.GetField(lenField);
-                        soh = equalSign + 1 + atol(fieldLength.c_str());
-                    }
-                    else if (isSetField(lenField))
-                    {
-                        fieldLength = getField(lenField);
-                        soh = equalSign + 1 + atol(fieldLength.c_str());
-                    }
-                }
-                */
-
-                pos = fieldvalend + 1;
-                return field;
-            }
-            catch (System.ArgumentOutOfRangeException e)
-            {
-                throw new MessageParseError("Error at position (" + pos + ") while parsing msg (" + msgstr + ")", e);
-            }
-            catch (System.OverflowException e)
-            {
-                throw new MessageParseError("Error at position (" + pos + ") while parsing msg (" + msgstr + ")", e);
-            }
-            catch (System.FormatException e)
-            {
-                throw new MessageParseError("Error at position (" + pos + ") while parsing msg (" + msgstr + ")", e);
-            }
+            throw new MessageParseError("Error at position (" + pos + ") while parsing msg (" + msgstr + ")", e);
         }
-
-        public static StringField ExtractField(string msgstr, ref int pos)
+        catch (FormatException e)
         {
-            return ExtractField(msgstr, ref pos, null, null);
+            throw new MessageParseError("Error at position (" + pos + ") while parsing msg (" + msgstr + ")", e);
         }
+    }
 
-        public static string ExtractBeginString(string msgstr)
-        {
-            int i = 0;
-            return ExtractField(msgstr, ref i, null, null).Obj;
-        }
+    public static string ExtractBeginString(string msgstr)
+    {
+        int i = 0;
+        return ExtractField(msgstr, ref i).Value;
+    }
 
-        public static bool IsHeaderField(int tag)
+    [Obsolete("This method is deprecated and will be removed in 1.16. Use IsHeaderField(int tag, DD? dd) instead.")]
+    public static bool IsHeaderField(int tag)
+    {
+        return IsGenericHeaderField(tag);
+    }
+
+    /// <summary>
+    /// Determine if field is a header according to the standard vanilla DD.
+    /// The header list in this function is hardcoded.
+    /// </summary>
+    /// <param name="tag"></param>
+    /// <returns></returns>
+    private static bool IsGenericHeaderField(int tag)
+    {
+        switch (tag)
         {
-            switch (tag)
-            {
-                case Tags.BeginString:
-                case Tags.BodyLength:
-                case Tags.MsgType:
-                case Tags.SenderCompID:
-                case Tags.TargetCompID:
-                case Tags.OnBehalfOfCompID:
-                case Tags.DeliverToCompID:
-                case Tags.SecureDataLen:
-                case Tags.MsgSeqNum:
-                case Tags.SenderSubID:
-                case Tags.SenderLocationID:
-                case Tags.TargetSubID:
-                case Tags.TargetLocationID:
-                case Tags.OnBehalfOfSubID:
-                case Tags.OnBehalfOfLocationID:
-                case Tags.DeliverToSubID:
-                case Tags.DeliverToLocationID:
-                case Tags.PossDupFlag:
-                case Tags.PossResend:
-                case Tags.SendingTime:
-                case Tags.OrigSendingTime:
-                case Tags.XmlDataLen:
-                case Tags.XmlData:
-                case Tags.MessageEncoding:
-                case Tags.LastMsgSeqNumProcessed:
-                    // case Tags.OnBehalfOfSendingTime: TODO 
-                    return true;
-                default:
-                    return false;
-            }
-        }
-        public static bool IsHeaderField(int tag, DataDictionary.DataDictionary dd)
-        {
-            if (IsHeaderField(tag))
+            case Tags.BeginString:
+            case Tags.BodyLength:
+            case Tags.MsgType:
+            case Tags.SenderCompID:
+            case Tags.TargetCompID:
+            case Tags.OnBehalfOfCompID:
+            case Tags.DeliverToCompID:
+            case Tags.SecureDataLen:
+            case Tags.MsgSeqNum:
+            case Tags.SenderSubID:
+            case Tags.SenderLocationID:
+            case Tags.TargetSubID:
+            case Tags.TargetLocationID:
+            case Tags.OnBehalfOfSubID:
+            case Tags.OnBehalfOfLocationID:
+            case Tags.DeliverToSubID:
+            case Tags.DeliverToLocationID:
+            case Tags.PossDupFlag:
+            case Tags.PossResend:
+            case Tags.SendingTime:
+            case Tags.OrigSendingTime:
+            case Tags.XmlDataLen:
+            case Tags.XmlData:
+            case Tags.MessageEncoding:
+            case Tags.LastMsgSeqNumProcessed:
+                // case Tags.OnBehalfOfSendingTime: TODO
                 return true;
-            if (null != dd)
-                return dd.IsHeaderField(tag);
-            return false;
+            default:
+                return false;
         }
+    }
 
-        public static bool IsTrailerField(int tag)
-        {
-            switch (tag)
-            {
-                case Tags.SignatureLength:
-                case Tags.Signature:
-                case Tags.CheckSum:
-                    return true;
-                default:
-                    return false;
-            }
-        }
-        public static bool IsTrailerField(int tag, DataDictionary.DataDictionary dd)
-        {
-            if (IsTrailerField(tag))
-                return true;
-            if (null != dd)
-                return dd.IsTrailerField(tag);
-            return false;
-        }
-
-        public static string GetFieldOrDefault(FieldMap fields, int tag, string defaultValue)
-        {
-            if (!fields.IsSetField(tag))
-                return defaultValue;
-
-            try
-            {
-                return fields.GetField(tag);
-            }
-            catch (FieldNotFoundException)
-            {
-                return defaultValue;
-            }
-        }
-
-        public static SessionID GetReverseSessionID(Message msg)
-        {
-            return new SessionID(
-                GetFieldOrDefault(msg.Header, Tags.BeginString, null),
-                GetFieldOrDefault(msg.Header, Tags.TargetCompID, null),
-                GetFieldOrDefault(msg.Header, Tags.TargetSubID, SessionID.NOT_SET),
-                GetFieldOrDefault(msg.Header, Tags.TargetLocationID, SessionID.NOT_SET),
-                GetFieldOrDefault(msg.Header, Tags.SenderCompID, null),
-                GetFieldOrDefault(msg.Header, Tags.SenderSubID, SessionID.NOT_SET),
-                GetFieldOrDefault(msg.Header, Tags.SenderLocationID, SessionID.NOT_SET)
-            );
-        }
-
-        /// <summary>
-        /// FIXME works, but implementation is shady
-        /// </summary>
-        /// <param name="msg"></param>
-        /// <returns></returns>
-        public static SessionID GetReverseSessionID(string msg)
-        {
-            Message FIXME = new Message(msg);
-            return GetReverseSessionID(FIXME);
-        }
-
-        /// <summary>
-        /// Parse the message type (tag 35) from a FIX string
-        /// </summary>
-        /// <param name="fixstring">the FIX string to parse</param>
-        /// <returns>message type</returns>
-        /// <exception cref="MessageParseError">if 35 tag is missing or malformed</exception>
-        public static string GetMsgType(string fixstring)
-        {
-            Match match = Regex.Match(fixstring, Message.SOH + "35=([^" + Message.SOH + "]*)" + Message.SOH);
-            if (match.Success)
-                return match.Groups[1].Value;
-
-            throw new MessageParseError("missing or malformed tag 35 in msg: " + fixstring);
-        }
-
-        public static ApplVerID GetApplVerID(string beginString)
-        {
-            switch (beginString)
-            {
-                case FixValues.BeginString.FIX40:
-                    return new ApplVerID(ApplVerID.FIX40);
-                case FixValues.BeginString.FIX41:
-                    return new ApplVerID(ApplVerID.FIX41);
-                case FixValues.BeginString.FIX42:
-                    return new ApplVerID(ApplVerID.FIX42);
-                case FixValues.BeginString.FIX43:
-                    return new ApplVerID(ApplVerID.FIX43);
-                case FixValues.BeginString.FIX44:
-                    return new ApplVerID(ApplVerID.FIX44);
-                case FixValues.BeginString.FIX50:
-                    return new ApplVerID(ApplVerID.FIX50);
-                case "FIX.5.0SP1":
-                    return new ApplVerID(ApplVerID.FIX50SP1);
-                case "FIX.5.0SP2":
-                    return new ApplVerID(ApplVerID.FIX50SP2);
-                default:
-                    throw new System.ArgumentException(String.Format("ApplVerID for {0} not supported", beginString));
-            }
-        }
-
-        #endregion
-
-        public bool FromStringHeader(string msgstr)
-        {
-            Clear();
-            
-            int pos = 0;
-            int count = 0;
-            while(pos < msgstr.Length)
-            {
-                StringField f = ExtractField(msgstr, ref pos);
-                
-                if((count < 3) && (Header.HEADER_FIELD_ORDER[count++] != f.Tag))
-                    return false;
-                
-                if(IsHeaderField(f.Tag))
-                    this.Header.SetField(f, false);
-                else
-                    break;
-            }
+    /// <summary>
+    /// Determine if field is a header field.
+    /// If transportDataDictionary is null, compares against a hard-coded list of header fields as
+    /// specified in the standard FIX data dictionaries.
+    /// </summary>
+    /// <param name="tag"></param>
+    /// <param name="transportDataDictionary"></param>
+    /// <returns></returns>
+    public static bool IsHeaderField(int tag, DD? transportDataDictionary)
+    {
+        if (IsGenericHeaderField(tag))
             return true;
-        }
+        if (transportDataDictionary is not null)
+            return transportDataDictionary.IsHeaderField(tag);
+        return false;
+    }
 
-        /// <summary>
-        /// Creates a Message from a FIX string
-        /// </summary>
-        /// <param name="msgstr"></param>
-        /// <param name="validate"></param>
-        /// <param name="sessionDD"></param>
-        /// <param name="appDD"></param>
-        public void FromString(string msgstr, bool validate, DataDictionary.DataDictionary sessionDD, DataDictionary.DataDictionary appDD)
+    public static bool IsTrailerField(int tag)
+    {
+        switch (tag)
         {
-            FromString(msgstr, validate, sessionDD, appDD, null);
+            case Tags.SignatureLength:
+            case Tags.Signature:
+            case Tags.CheckSum:
+                return true;
+            default:
+                return false;
         }
+    }
 
-        /// <summary>
-        /// Create a Message from a FIX string
-        /// </summary>
-        /// <param name="msgstr"></param>
-        /// <param name="validate"></param>
-        /// <param name="sessionDD"></param>
-        /// <param name="appDD"></param>
-        /// <param name="msgFactory">If null, any groups will be constructed as generic Group objects</param>
-        public void FromString(string msgstr, bool validate,
-            DataDictionary.DataDictionary sessionDD, DataDictionary.DataDictionary appDD, IMessageFactory msgFactory)
+    public static bool IsTrailerField(int tag, DD? dd)
+    {
+        if (IsTrailerField(tag))
+            return true;
+        if (dd is not null)
+            return dd.IsTrailerField(tag);
+        return false;
+    }
+
+    private static string GetFieldOrDefault(FieldMap fields, int tag, string defaultValue)
+    {
+        if (!fields.IsSetField(tag))
+            return defaultValue;
+
+        try
         {
-            FromString(msgstr, validate, sessionDD, appDD, msgFactory, false);
+            return fields.GetString(tag);
         }
-
-        /// <summary>
-        /// Creates a Message from a FIX string
-        /// </summary>
-        /// <param name="msgstr"></param>
-        /// <param name="validate"></param>
-        /// <param name="sessionDD"></param>
-        /// <param name="appDD"></param>
-        /// <param name="msgFactory">If null, any groups will be constructed as generic Group objects</param>
-        /// <param name="ignoreBody">(default false) if true, ignores all non-header non-trailer fields.
-        ///   Intended for callers that only need rejection-related information from the header.
-        ///   </param>
-        public void FromString(string msgstr, bool validate,
-            DataDictionary.DataDictionary sessionDD, DataDictionary.DataDictionary appDD, IMessageFactory msgFactory,
-            bool ignoreBody)
+        catch (FieldNotFoundException)
         {
-            Clear();
+            return defaultValue;
+        }
+    }
 
-            string msgType = "";
-            bool expectingHeader = true;
-            bool expectingBody = true;
-            int count = 0;
-            int pos = 0;
-	        DataDictionary.IFieldMapSpec msgMap = null;
+    private static SessionID GetReverseSessionId(Message msg)
+    {
+        return new SessionID(
+            GetFieldOrDefault(msg.Header, Tags.BeginString, SessionID.NOT_SET),
+            GetFieldOrDefault(msg.Header, Tags.TargetCompID, SessionID.NOT_SET),
+            GetFieldOrDefault(msg.Header, Tags.TargetSubID, SessionID.NOT_SET),
+            GetFieldOrDefault(msg.Header, Tags.TargetLocationID, SessionID.NOT_SET),
+            GetFieldOrDefault(msg.Header, Tags.SenderCompID, SessionID.NOT_SET),
+            GetFieldOrDefault(msg.Header, Tags.SenderSubID, SessionID.NOT_SET),
+            GetFieldOrDefault(msg.Header, Tags.SenderLocationID, SessionID.NOT_SET)
+        );
+    }
 
-            while (pos < msgstr.Length)
+    public static SessionID GetReverseSessionId(string msg)
+    {
+        Message m = new Message(msg);
+        return GetReverseSessionId(m);
+    }
+
+    /// <summary>
+    /// Parse the message type (tag 35) from a FIX string
+    /// </summary>
+    /// <param name="fixstring">the FIX string to parse</param>
+    /// <returns>message type</returns>
+    /// <exception cref="MessageParseError">if 35 tag is missing or malformed</exception>
+    public static string GetMsgType(string fixstring)
+    {
+        // Note: This is faster than regex.  See stats from https://github.com/connamara/quickfixn/pull/910
+        ReadOnlySpan<char> chars = fixstring.AsSpan();
+        int l = 0;
+        int r = 1;
+
+        if (chars.Length > 0 && chars[0] == SOH) l = 1;
+        while (r < chars.Length)
+        {
+            if (chars[r] == SOH)
             {
-                StringField f = ExtractField(msgstr, ref pos, sessionDD, appDD);
-                
-                if (validate && (count < 3) && (Header.HEADER_FIELD_ORDER[count++] != f.Tag))
-                    throw new InvalidMessage("Header fields out of order");
-
-                if (IsHeaderField(f.Tag, sessionDD))
+                if (r - l >= 4 &&
+                    chars[l] == '3' &&
+                    chars[l + 1] == '5' &&
+                    chars[l + 2] == '=')
                 {
-                    if (!expectingHeader)
-                    {
-                        if (0 == field_)
-                            field_ = f.Tag;
-                        validStructure_ = false;
-                    }
-
-                    if (Tags.MsgType.Equals(f.Tag))
-                    {
-                        msgType = string.Copy(f.Obj);
-                        if (appDD != null)
-                        {
-                            msgMap = appDD.GetMapForMessage(msgType);
-                        }
-		            }
-
-                    if (!this.Header.SetField(f, false))
-                        this.Header.RepeatedTags.Add(f);
-
-                    if ((null != sessionDD) && sessionDD.Header.IsGroup(f.Tag))
-                    {
-                        pos = SetGroup(f, msgstr, pos, this.Header, sessionDD.Header.GetGroupSpec(f.Tag), sessionDD, appDD, msgFactory);
-                    }
-                }
-                else if (IsTrailerField(f.Tag, sessionDD))
-                {
-                    expectingHeader = false;
-                    expectingBody = false;
-                    if (!this.Trailer.SetField(f, false))
-                        this.Trailer.RepeatedTags.Add(f);
-
-                    if ((null != sessionDD) && sessionDD.Trailer.IsGroup(f.Tag))
-                    {
-                        pos = SetGroup(f, msgstr, pos, this.Trailer, sessionDD.Trailer.GetGroup(f.Tag), sessionDD, appDD, msgFactory);
-                    }
-                }
-                else if (ignoreBody==false)
-                {
-                    if (!expectingBody)
-                    {
-                        if (0 == field_)
-                            field_ = f.Tag;
-                        validStructure_ = false;
-                    }
-
-                    expectingHeader = false;
-                    if (!SetField(f, false))
-                    {
-                        this.RepeatedTags.Add(f);
-                    }
-
-                    
-                    if((null != msgMap) && (msgMap.IsGroup(f.Tag)))
-                    {
-                        pos = SetGroup(f, msgstr, pos, this, msgMap.GetGroupSpec(f.Tag), sessionDD, appDD, msgFactory);
-                    }
-                }
-            }
-
-            if (validate)
-            {
-                Validate();
-            }
-        }
-
-
-        [System.Obsolete("Use the version that takes an IMessageFactory instead")]
-        protected int SetGroup(StringField grpNoFld, string msgstr, int pos, FieldMap fieldMap, DataDictionary.IGroupSpec dd,
-            DataDictionary.DataDictionary sessionDataDictionary, DataDictionary.DataDictionary appDD)
-        {
-            return SetGroup(grpNoFld, msgstr, pos, fieldMap, dd, sessionDataDictionary, appDD, null);
-        }
-
-
-        /// <summary>
-        /// Constructs a group and stores it in this Message object
-        /// </summary>
-        /// <param name="grpNoFld">the group's counter field</param>
-        /// <param name="msgstr">full message string</param>
-        /// <param name="pos">starting character position of group</param>
-        /// <param name="fieldMap">full message as FieldMap</param>
-        /// <param name="dd">group definition structure from dd</param>
-        /// <param name="sessionDataDictionary"></param>
-        /// <param name="appDD"></param>
-        /// <param name="msgFactory">if null, then this method will use the generic Group class constructor</param>
-        /// <returns></returns>
-        protected int SetGroup(
-            StringField grpNoFld, string msgstr, int pos, FieldMap fieldMap, DataDictionary.IGroupSpec dd,
-            DataDictionary.DataDictionary sessionDataDictionary, DataDictionary.DataDictionary appDD, IMessageFactory msgFactory)
-        {
-            int grpEntryDelimiterTag = dd.Delim;
-            int grpPos = pos;
-            Group grp = null; // the group entry being constructed
-
-            while (pos < msgstr.Length)
-            {
-                grpPos = pos;
-                StringField f = ExtractField(msgstr, ref pos, sessionDataDictionary, appDD);
-                if (f.Tag == grpEntryDelimiterTag)
-                {
-                    // This is the start of a group entry.
-
-                    if (grp != null)
-                    {
-                        // We were already building an entry, so the delimiter means it's done.
-                        fieldMap.AddGroup(grp, false);
-                        grp = null; // prepare for new Group
-                    }
-
-                    // Create a new group!
-                    if (msgFactory != null)
-                        grp = msgFactory.Create(Message.ExtractBeginString(msgstr), Message.GetMsgType(msgstr), grpNoFld.Tag);
-
-                    //If above failed (shouldn't ever happen), just use a generic Group.
-                    if (grp == null)
-                        grp = new Group(grpNoFld.Tag, grpEntryDelimiterTag);
-                }
-                else if (!dd.IsField(f.Tag))
-                {
-                    // This field is not in the group, thus the repeating group is done.
-
-                    if (grp != null)
-                    {
-                        fieldMap.AddGroup(grp, false);
-                    }
-                    return grpPos;
+                    return new string(chars[(l + 3)..r]);
                 }
 
-                if (grp == null)
-                {
-                    // This means we got into the group's fields without finding a delimiter tag.
-                    throw new GroupDelimiterTagException(grpNoFld.Tag, grpEntryDelimiterTag);
-                }
-
-                // f is just a field in our group entry.  Add it and iterate again.
-                grp.SetField(f);
-                if(dd.IsGroup(f.Tag))
-                {
-                    // f is a counter for a nested group.  Recurse!
-                    pos = SetGroup(f, msgstr, pos, grp, dd.GetGroupSpec(f.Tag), sessionDataDictionary, appDD, msgFactory);
-                }
+                l = r + 1;
             }
-            
-            return grpPos;
+
+            r++;
         }
 
-        public bool HasValidStructure(out int field)
+        throw new MessageParseError("Missing or malformed tag 35 in msg: " + fixstring);
+    }
+
+    public static ApplVerID GetApplVerID(string beginString)
+    {
+        switch (beginString)
         {
-            field = field_;
-            return validStructure_;
+            case FixValues.BeginString.FIX40:
+                return new ApplVerID(ApplVerID.FIX40);
+            case FixValues.BeginString.FIX41:
+                return new ApplVerID(ApplVerID.FIX41);
+            case FixValues.BeginString.FIX42:
+                return new ApplVerID(ApplVerID.FIX42);
+            case FixValues.BeginString.FIX43:
+                return new ApplVerID(ApplVerID.FIX43);
+            case FixValues.BeginString.FIX44:
+                return new ApplVerID(ApplVerID.FIX44);
+            case FixValues.BeginString.FIX50:
+                return new ApplVerID(ApplVerID.FIX50);
+            case FixValues.BeginString.FIX50SP1:
+                return new ApplVerID(ApplVerID.FIX50SP1);
+            case FixValues.BeginString.FIX50SP2:
+                return new ApplVerID(ApplVerID.FIX50SP2);
+            default:
+                throw new ArgumentException($"ApplVerID for {beginString} not supported");
         }
+    }
 
-        public void Validate()
+    #endregion
+
+    public override void Clear()
+    {
+        _invalidField = 0;
+        Header.Clear();
+        base.Clear();
+        Trailer.Clear();
+    }
+
+    private void PopulateHeaderFromMessageString(string msgstr, DD? dd)
+    {
+        Clear();
+
+        int pos = 0;
+        int count = 0;
+        while(pos < msgstr.Length)
         {
-            try
-            {
-                int receivedBodyLength = this.Header.GetInt(Tags.BodyLength);
-                if (BodyLength() != receivedBodyLength)
-                    throw new InvalidMessage("Expected BodyLength=" + BodyLength() + ", Received BodyLength=" + receivedBodyLength);
+            StringField f = ExtractField(msgstr, ref pos);
 
-                int receivedCheckSum = this.Trailer.GetInt(Tags.CheckSum);
-                if (CheckSum() != receivedCheckSum)
-                    throw new InvalidMessage("Expected CheckSum=" + CheckSum() + ", Received CheckSum=" + receivedCheckSum);
-            }
-            catch (FieldNotFoundException e)
-            {
-                throw new InvalidMessage("BodyLength or CheckSum missing", e);
-            }
-            catch (FieldConvertError e)
-            {
-                throw new InvalidMessage("BodyLength or Checksum has wrong format", e);
-            }
-        }
+            if (count < 3 && Header.HEADER_FIELD_ORDER[count++] != f.Tag)
+                return;
 
-        public void ReverseRoute(Header header)
-        {
-            // required routing tags
-            this.Header.RemoveField(Tags.BeginString);
-            this.Header.RemoveField(Tags.SenderCompID);
-            this.Header.RemoveField(Tags.SenderSubID);
-            this.Header.RemoveField(Tags.SenderLocationID);
-            this.Header.RemoveField(Tags.TargetCompID);
-            this.Header.RemoveField(Tags.TargetSubID);
-            this.Header.RemoveField(Tags.TargetLocationID);
-
-            if (header.IsSetField(Tags.BeginString))
-            {
-                string beginString = header.GetField(Tags.BeginString);
-                if (beginString.Length > 0)
-                    this.Header.SetField(new BeginString(beginString));
-
-                this.Header.RemoveField(Tags.OnBehalfOfLocationID);
-                this.Header.RemoveField(Tags.DeliverToLocationID);
-
-                if (beginString.CompareTo("FIX.4.1") >= 0)
-                {
-                    if (header.IsSetField(Tags.OnBehalfOfLocationID))
-                    {
-                        string onBehalfOfLocationID = header.GetField(Tags.OnBehalfOfLocationID);
-                        if (onBehalfOfLocationID.Length > 0)
-                            this.Header.SetField(new DeliverToLocationID(onBehalfOfLocationID));
-                    }
-
-                    if (header.IsSetField(Tags.DeliverToLocationID))
-                    {
-                        string deliverToLocationID = header.GetField(Tags.DeliverToLocationID);
-                        if (deliverToLocationID.Length > 0)
-                            this.Header.SetField(new OnBehalfOfLocationID(deliverToLocationID));
-                    }
-                }
-            }
-
-            if (header.IsSetField(Tags.SenderCompID))
-            {
-                SenderCompID senderCompID = new SenderCompID();
-                header.GetField(senderCompID);
-                if (senderCompID.Obj.Length > 0)
-                    this.Header.SetField(new TargetCompID(senderCompID.Obj));
-            }
-
-            if (header.IsSetField(Tags.SenderSubID))
-            {
-                SenderSubID senderSubID = new SenderSubID();
-                header.GetField(senderSubID);
-                if (senderSubID.Obj.Length > 0)
-                    this.Header.SetField(new TargetSubID(senderSubID.Obj));
-            }
-
-            if (header.IsSetField(Tags.SenderLocationID))
-            {
-                SenderLocationID senderLocationID = new SenderLocationID();
-                header.GetField(senderLocationID);
-                if (senderLocationID.Obj.Length > 0)
-                    this.Header.SetField(new TargetLocationID(senderLocationID.Obj));
-            }
-
-            if (header.IsSetField(Tags.TargetCompID))
-            {
-                TargetCompID targetCompID = new TargetCompID();
-                header.GetField(targetCompID);
-                if (targetCompID.Obj.Length > 0)
-                    this.Header.SetField(new SenderCompID(targetCompID.Obj));
-            }
-
-            if (header.IsSetField(Tags.TargetSubID))
-            {
-                TargetSubID targetSubID = new TargetSubID();
-                header.GetField(targetSubID);
-                if (targetSubID.Obj.Length > 0)
-                    this.Header.SetField(new SenderSubID(targetSubID.Obj));
-            }
-
-            if (header.IsSetField(Tags.TargetLocationID))
-            {
-                TargetLocationID targetLocationID = new TargetLocationID();
-                header.GetField(targetLocationID);
-                if (targetLocationID.Obj.Length > 0)
-                    this.Header.SetField(new SenderLocationID(targetLocationID.Obj));
-            }
-
-            // optional routing tags
-            this.Header.RemoveField(Tags.OnBehalfOfCompID);
-            this.Header.RemoveField(Tags.OnBehalfOfSubID);
-            this.Header.RemoveField(Tags.DeliverToCompID);
-            this.Header.RemoveField(Tags.DeliverToSubID);
-
-            if(header.IsSetField(Tags.OnBehalfOfCompID))
-            {
-                string onBehalfOfCompID = header.GetField(Tags.OnBehalfOfCompID);
-                if(onBehalfOfCompID.Length > 0)
-                    this.Header.SetField(new DeliverToCompID(onBehalfOfCompID));
-            }
-
-            if(header.IsSetField(Tags.OnBehalfOfSubID))
-            {
-                string onBehalfOfSubID = header.GetField(  Tags.OnBehalfOfSubID);
-                if(onBehalfOfSubID.Length > 0)
-                    this.Header.SetField(new DeliverToSubID(onBehalfOfSubID));
-            }
-
-            if(header.IsSetField(Tags.DeliverToCompID))
-            {
-                string deliverToCompID = header.GetField(Tags.DeliverToCompID);
-                if(deliverToCompID.Length > 0)
-                    this.Header.SetField(new OnBehalfOfCompID(deliverToCompID));
-            }
-
-            if(header.IsSetField(Tags.DeliverToSubID))
-            {
-                string deliverToSubID = header.GetField(Tags.DeliverToSubID);
-                if(deliverToSubID.Length > 0)
-                    this.Header.SetField(new OnBehalfOfSubID(deliverToSubID));
-            }
-        }
-
-        public int CheckSum()
-        {
-            return (
-                (this.Header.CalculateTotal()
-                + CalculateTotal()
-                + this.Trailer.CalculateTotal()) % 256);
-        }
-
-        public bool IsAdmin()
-        {
-            return this.Header.IsSetField(Tags.MsgType) && IsAdminMsgType(this.Header.GetField(Tags.MsgType));
-        }
-
-        public bool IsApp()
-        {
-            return this.Header.IsSetField(Tags.MsgType) && !IsAdminMsgType(this.Header.GetField(Tags.MsgType));
-        }
-
-        /// <summary>
-        /// FIXME less operator new
-        /// </summary>
-        /// <param name="sessionID"></param>
-        public void SetSessionID(SessionID sessionID)
-        {
-            this.Header.SetField(new BeginString(sessionID.BeginString));
-            this.Header.SetField(new SenderCompID(sessionID.SenderCompID));
-            if (SessionID.IsSet(sessionID.SenderSubID))
-                this.Header.SetField(new SenderSubID(sessionID.SenderSubID));
-            if (SessionID.IsSet(sessionID.SenderLocationID))
-                this.Header.SetField(new SenderLocationID(sessionID.SenderLocationID));
-            this.Header.SetField(new TargetCompID(sessionID.TargetCompID));
-            if (SessionID.IsSet(sessionID.TargetSubID))
-                this.Header.SetField(new TargetSubID(sessionID.TargetSubID));
-            if (SessionID.IsSet(sessionID.TargetLocationID))
-                this.Header.SetField(new TargetLocationID(sessionID.TargetLocationID));
-        }
-
-        public SessionID GetSessionID(Message m)
-        {
-            bool senderSubIDSet = m.Header.IsSetField(Tags.SenderSubID);
-            bool senderLocationIDSet = m.Header.IsSetField(Tags.SenderLocationID);
-            bool targetSubIDSet = m.Header.IsSetField(Tags.TargetSubID);
-            bool targetLocationIDSet = m.Header.IsSetField(Tags.TargetLocationID);
-
-            if (senderSubIDSet && senderLocationIDSet && targetSubIDSet && targetLocationIDSet)
-                return new SessionID(m.Header.GetField(Tags.BeginString),
-                    m.Header.GetField(Tags.SenderCompID), m.Header.GetField(Tags.SenderSubID), m.Header.GetField(Tags.SenderLocationID),
-                    m.Header.GetField(Tags.TargetCompID), m.Header.GetField(Tags.TargetSubID), m.Header.GetField(Tags.TargetLocationID));
-            else if (senderSubIDSet && targetSubIDSet)
-                return new SessionID(m.Header.GetField(Tags.BeginString),
-                    m.Header.GetField(Tags.SenderCompID), m.Header.GetField(Tags.SenderSubID),
-                    m.Header.GetField(Tags.TargetCompID), m.Header.GetField(Tags.TargetSubID));
+            if(IsHeaderField(f.Tag, dd))
+                Header.SetField(f, false);
             else
-                return new SessionID(
-                    m.Header.GetField(Tags.BeginString),
-                    m.Header.GetField(Tags.SenderCompID),
-                    m.Header.GetField(Tags.TargetCompID));
+                break;
         }
+    }
 
-        public override void Clear()
-        {
-            field_ = 0;
-            this.Header.Clear();
-            base.Clear();
-            this.Trailer.Clear();
-        }
+    /// <summary>
+    /// Creates a Message from a FIX string
+    /// </summary>
+    /// <param name="msgstr"></param>
+    /// <param name="validate"></param>
+    /// <param name="transportDict">(if FIX4, transportDict and appDict should be the same)</param>
+    /// <param name="appDict">(if FIX4, transportDict and appDict will be the same)</param>
+    /// <param name="msgFactory">If null, any groups will be constructed as generic Group objects</param>
+    /// <param name="ignoreBody">(default false) if true, ignores all non-header non-trailer fields.
+    ///   Intended for callers that only need rejection-related information from the header.
+    ///   </param>
+    public void FromString(
+        string msgstr,
+        bool validate,
+        DD? transportDict,
+        DD? appDict,
+        IMessageFactory? msgFactory = null,
+        bool ignoreBody = false)
+    {
+        Clear();
 
-        private Object lock_ToString = new Object();
-        public override string ToString()
+        bool expectingHeader = true;
+        bool expectingBody = true;
+        int count = 0;
+        int pos = 0;
+        IFieldMapSpec? msgMap = null;
+
+        while (pos < msgstr.Length)
         {
-            lock (lock_ToString)
+            int fieldTag = ExtractFieldTag(msgstr, pos);
+            StringField f = fieldTag == Tags.XmlData
+                ? ExtractDataField(msgstr, Header.GetInt(Tags.XmlDataLen), ref pos)
+                : ExtractField(msgstr, ref pos);
+
+            if (validate && (count < 3) && (Header.HEADER_FIELD_ORDER[count++] != f.Tag))
+                throw new InvalidMessage("Header fields out of order");
+
+            if (IsHeaderField(f.Tag, transportDict))
             {
-                this.Header.SetField(new BodyLength(BodyLength()), true);
-                this.Trailer.SetField(new CheckSum(Fields.Converters.CheckSumConverter.Convert(CheckSum())), true);
+                if (!expectingHeader)
+                {
+                    if (0 == _invalidField)
+                        _invalidField = f.Tag;
+                    _isValid = false;
+                }
 
-                return this.Header.CalculateString() + CalculateString() + this.Trailer.CalculateString();
+                if (Tags.MsgType.Equals(f.Tag))
+                {
+                    string msgType = f.Value;
+                    if (appDict is not null)
+                    {
+                        msgMap = appDict.GetMapForMessage(msgType);
+                    }
+                }
+
+                if (!Header.SetField(f, false))
+                    Header.RepeatedTags.Add(f);
+
+                if (transportDict is not null && transportDict.Header.IsGroup(f.Tag))
+                {
+                    pos = SetGroup(f, msgstr, pos, Header, transportDict.Header.GetGroupSpec(f.Tag), msgFactory);
+                }
+            }
+            else if (IsTrailerField(f.Tag, transportDict))
+            {
+                expectingHeader = false;
+                expectingBody = false;
+                if (!Trailer.SetField(f, false))
+                    Trailer.RepeatedTags.Add(f);
+
+                if (transportDict is not null && transportDict.Trailer.IsGroup(f.Tag))
+                {
+                    pos = SetGroup(f, msgstr, pos, Trailer, transportDict.Trailer.GetGroup(f.Tag), msgFactory);
+                }
+            }
+            else if (ignoreBody==false)
+            {
+                if (!expectingBody)
+                {
+                    if (0 == _invalidField)
+                        _invalidField = f.Tag;
+                    _isValid = false;
+                }
+
+                expectingHeader = false;
+                if (!SetField(f, false))
+                {
+                    RepeatedTags.Add(f);
+                }
+
+                if(msgMap is not null && msgMap.IsGroup(f.Tag))
+                {
+                    pos = SetGroup(f, msgstr, pos, this, msgMap.GetGroupSpec(f.Tag), msgFactory);
+                }
             }
         }
 
-        protected int BodyLength()
+        if (validate)
         {
-            return this.Header.CalculateLength() + CalculateLength() + this.Trailer.CalculateLength();
+            Validate();
         }
+    }
+
+    /// <summary>
+    /// Creates a Message from FIX JSON Encoding.
+    /// See: https://github.com/FIXTradingCommunity/fix-json-encoding-spec
+    /// </summary>
+    /// <param name="json"></param>
+    /// <param name="validate"></param>
+    /// <param name="transportDict"></param>
+    /// <param name="appDict"></param>
+    /// <param name="msgFactory">If null, any groups will be constructed as generic Group objects</param>
+    public void FromJson(string json, bool validate,
+        DD transportDict,
+        DD appDict,
+        IMessageFactory? msgFactory)
+    {
+        Clear();
+
+        using (JsonDocument document = JsonDocument.Parse(json)) {
+            string? beginString = document.RootElement.GetProperty("Header").GetProperty("BeginString").GetString();
+            string? msgType     = document.RootElement.GetProperty("Header").GetProperty("MsgType").GetString();
+
+            if (beginString is null || msgType is null) {
+                throw new ArgumentException(
+                    $"JSON message has invalid/missing beginString ({beginString}) and/or msgType ({msgType})");
+            }
+
+            IFieldMapSpec? msgMap = appDict.GetMapForMessage(msgType);
+            FromJson(document.RootElement.GetProperty("Header"),  beginString, msgType, msgMap, msgFactory, transportDict, Header);
+            FromJson(document.RootElement.GetProperty("Body"),    beginString, msgType, msgMap, msgFactory, appDict, this);
+            FromJson(document.RootElement.GetProperty("Trailer"), beginString, msgType, msgMap, msgFactory, transportDict, Trailer);
+        }
+
+        Header.SetField(new BodyLength(BodyLength()), true);
+        Trailer.SetField(new CheckSum(Fields.Converters.CheckSumConverter.Convert(CheckSum())), true);
+
+        if (validate)
+        {
+            Validate();
+        }
+    }
+
+    protected void FromJson(JsonElement jsonElement,
+        string beginString,
+        string msgType,
+        IFieldMapSpec? msgMap,
+        IMessageFactory? msgFactory,
+        DD dataDict,
+        FieldMap fieldMap)
+    {
+        foreach (JsonProperty field in jsonElement.EnumerateObject())
+        {
+            if (dataDict.FieldsByName.TryGetValue(field.Name, out DDField? ddField))
+            {
+                if (msgMap is not null && msgMap.IsGroup(ddField.Tag) && JsonValueKind.Array == field.Value.ValueKind)
+                {
+                    foreach (JsonElement jsonGrp in field.Value.EnumerateArray())
+                    {
+                        IGroupSpec grpSpec = msgMap.GetGroupSpec(ddField.Tag);
+
+                        Group grp = msgFactory?.Create(beginString, msgType, ddField.Tag)
+                            ?? new Group(ddField.Tag, grpSpec.Delim);
+                        FromJson(jsonGrp, beginString, msgType, grpSpec, msgFactory, dataDict, grp);
+                        fieldMap.AddGroup(grp);
+                    }
+                }
+
+                if (JsonValueKind.Array != field.Value.ValueKind)
+                {
+                    fieldMap.SetField(new StringField(ddField.Tag, field.Value.ToString()));
+                }
+            }
+            else
+            {
+                // this may be a custom tag given by number instead of name
+                if (int.TryParse(field.Name, out int customTagNumber))
+                {
+                    fieldMap.SetField(new StringField(customTagNumber, field.Value.ToString()));
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Constructs a group and stores it in this Message object
+    /// </summary>
+    /// <param name="grpNoFld">the group's counter field</param>
+    /// <param name="msgstr">full message string</param>
+    /// <param name="pos">starting character position of group</param>
+    /// <param name="fieldMap">full message as FieldMap</param>
+    /// <param name="groupSpec">group definition structure from dd</param>
+    /// <param name="msgFactory">if null, then this method will use the generic Group class constructor</param>
+    /// <returns></returns>
+    protected int SetGroup(
+        StringField grpNoFld, string msgstr, int pos, FieldMap fieldMap, IGroupSpec groupSpec,
+        IMessageFactory? msgFactory)
+    {
+        int grpEntryDelimiterTag = groupSpec.Delim;
+        int grpPos = pos;
+        Group? grp = null; // the group entry being constructed
+
+        while (pos < msgstr.Length)
+        {
+            grpPos = pos;
+            StringField f = ExtractField(msgstr, ref pos);
+            if (f.Tag == grpEntryDelimiterTag)
+            {
+                // This is the start of a group entry.
+
+                if (grp is not null)
+                {
+                    // We were already building an entry, so the delimiter means it's done.
+                    fieldMap.AddGroup(grp, false);
+                }
+
+                // Create a new group!
+                grp = msgFactory?.Create(ExtractBeginString(msgstr), GetMsgType(msgstr), grpNoFld.Tag)
+                    ?? new Group(grpNoFld.Tag, grpEntryDelimiterTag);
+            }
+            else if (!groupSpec.IsField(f.Tag))
+            {
+                // This field is not in the group, thus the repeating group is done.
+                if (grp is not null)
+                {
+                    fieldMap.AddGroup(grp, false);
+                }
+                return grpPos;
+            }
+            else if(groupSpec.IsField(f.Tag) && grp is not null && grp.IsSetField(f.Tag))
+            {
+                // Tag is appearing for the second time within a group element.
+                // Presumably the sender didn't set the delimiter (or their DD has a different delimiter).
+                throw new RepeatedTagWithoutGroupDelimiterTagException(grpNoFld.Tag, f.Tag);
+            }
+
+            if (grp is null)
+            {
+                // This means we got into the group's fields without finding a delimiter tag.
+                throw new GroupDelimiterTagException(grpNoFld.Tag, grpEntryDelimiterTag);
+            }
+
+            // f is just a field in our group entry.  Add it and iterate again.
+            grp.SetField(f);
+            if(groupSpec.IsGroup(f.Tag))
+            {
+                // f is a counter for a nested group.  Recurse!
+                pos = SetGroup(f, msgstr, pos, grp, groupSpec.GetGroupSpec(f.Tag), msgFactory);
+            }
+
+            // rare situation: if message ends on an in-group field (which means it lacks a checksum),
+            //   then this logic is needed here to actually write the group (because this loop won't run again)
+            if (pos == msgstr.Length) {
+                fieldMap.AddGroup(grp, false);
+                return pos;
+            }
+        }
+
+        return grpPos;
+    }
+
+    /// <summary>
+    /// Check if this message was deemed valid.
+    /// </summary>
+    /// <param name="problemField">If invalid, then this is set to the field that is the problem</param>
+    /// <returns></returns>
+    public bool HasValidStructure(out int problemField) {
+        problemField = _isValid ? 0 : _invalidField;
+        return _isValid;
+    }
+
+    public void Validate()
+    {
+        try
+        {
+            int receivedBodyLength = Header.GetInt(Tags.BodyLength);
+            if (BodyLength() != receivedBodyLength)
+                throw new InvalidMessage("Expected BodyLength=" + BodyLength() + ", Received BodyLength=" + receivedBodyLength + ", Message.SeqNum=" + Header.GetULong(Tags.MsgSeqNum));
+
+            int receivedCheckSum = Trailer.GetInt(Tags.CheckSum);
+            if (CheckSum() != receivedCheckSum)
+                throw new InvalidMessage("Expected CheckSum=" + CheckSum() + ", Received CheckSum=" + receivedCheckSum + ", Message.SeqNum=" + Header.GetULong(Tags.MsgSeqNum));
+        }
+        catch (FieldNotFoundException e)
+        {
+            throw new InvalidMessage("BodyLength or CheckSum missing", e);
+        }
+        catch (FieldConvertError e)
+        {
+            throw new InvalidMessage("BodyLength or Checksum has wrong format", e);
+        }
+    }
+
+    public void ReverseRoute(Header header)
+    {
+        // required routing tags
+        Header.RemoveField(Tags.BeginString);
+        Header.RemoveField(Tags.SenderCompID);
+        Header.RemoveField(Tags.SenderSubID);
+        Header.RemoveField(Tags.SenderLocationID);
+        Header.RemoveField(Tags.TargetCompID);
+        Header.RemoveField(Tags.TargetSubID);
+        Header.RemoveField(Tags.TargetLocationID);
+
+        if (header.IsSetField(Tags.BeginString))
+        {
+            string beginString = header.GetString(Tags.BeginString);
+            if (beginString.Length > 0)
+                Header.SetField(new BeginString(beginString));
+
+            Header.RemoveField(Tags.OnBehalfOfLocationID);
+            Header.RemoveField(Tags.DeliverToLocationID);
+
+            if (string.CompareOrdinal(beginString, "FIX.4.1") >= 0)
+            {
+                if (header.IsSetField(Tags.OnBehalfOfLocationID))
+                {
+                    string onBehalfOfLocationId = header.GetString(Tags.OnBehalfOfLocationID);
+                    if (onBehalfOfLocationId.Length > 0)
+                        Header.SetField(new DeliverToLocationID(onBehalfOfLocationId));
+                }
+
+                if (header.IsSetField(Tags.DeliverToLocationID))
+                {
+                    string deliverToLocationId = header.GetString(Tags.DeliverToLocationID);
+                    if (deliverToLocationId.Length > 0)
+                        Header.SetField(new OnBehalfOfLocationID(deliverToLocationId));
+                }
+            }
+        }
+
+        if (header.IsSetField(Tags.SenderCompID))
+        {
+            SenderCompID senderCompId = new SenderCompID();
+            header.GetField(senderCompId);
+            if (senderCompId.Value.Length > 0)
+                Header.SetField(new TargetCompID(senderCompId.Value));
+        }
+
+        if (header.IsSetField(Tags.SenderSubID))
+        {
+            SenderSubID senderSubId = new SenderSubID();
+            header.GetField(senderSubId);
+            if (senderSubId.Value.Length > 0)
+                Header.SetField(new TargetSubID(senderSubId.Value));
+        }
+
+        if (header.IsSetField(Tags.SenderLocationID))
+        {
+            SenderLocationID senderLocationId = new SenderLocationID();
+            header.GetField(senderLocationId);
+            if (senderLocationId.Value.Length > 0)
+                Header.SetField(new TargetLocationID(senderLocationId.Value));
+        }
+
+        if (header.IsSetField(Tags.TargetCompID))
+        {
+            TargetCompID targetCompId = new TargetCompID();
+            header.GetField(targetCompId);
+            if (targetCompId.Value.Length > 0)
+                Header.SetField(new SenderCompID(targetCompId.Value));
+        }
+
+        if (header.IsSetField(Tags.TargetSubID))
+        {
+            TargetSubID targetSubId = new TargetSubID();
+            header.GetField(targetSubId);
+            if (targetSubId.Value.Length > 0)
+                Header.SetField(new SenderSubID(targetSubId.Value));
+        }
+
+        if (header.IsSetField(Tags.TargetLocationID))
+        {
+            TargetLocationID targetLocationId = new TargetLocationID();
+            header.GetField(targetLocationId);
+            if (targetLocationId.Value.Length > 0)
+                Header.SetField(new SenderLocationID(targetLocationId.Value));
+        }
+
+        // optional routing tags
+        Header.RemoveField(Tags.OnBehalfOfCompID);
+        Header.RemoveField(Tags.OnBehalfOfSubID);
+        Header.RemoveField(Tags.DeliverToCompID);
+        Header.RemoveField(Tags.DeliverToSubID);
+
+        if(header.IsSetField(Tags.OnBehalfOfCompID))
+        {
+            string onBehalfOfCompId = header.GetString(Tags.OnBehalfOfCompID);
+            if(onBehalfOfCompId.Length > 0)
+                Header.SetField(new DeliverToCompID(onBehalfOfCompId));
+        }
+
+        if(header.IsSetField(Tags.OnBehalfOfSubID))
+        {
+            string onBehalfOfSubId = header.GetString(  Tags.OnBehalfOfSubID);
+            if(onBehalfOfSubId.Length > 0)
+                Header.SetField(new DeliverToSubID(onBehalfOfSubId));
+        }
+
+        if(header.IsSetField(Tags.DeliverToCompID))
+        {
+            string deliverToCompId = header.GetString(Tags.DeliverToCompID);
+            if(deliverToCompId.Length > 0)
+                Header.SetField(new OnBehalfOfCompID(deliverToCompId));
+        }
+
+        if(header.IsSetField(Tags.DeliverToSubID))
+        {
+            string deliverToSubId = header.GetString(Tags.DeliverToSubID);
+            if(deliverToSubId.Length > 0)
+                Header.SetField(new OnBehalfOfSubID(deliverToSubId));
+        }
+    }
+
+    public int CheckSum()
+    {
+        return (
+            (Header.CalculateTotal()
+            + CalculateTotal()
+            + Trailer.CalculateTotal()) % 256);
+    }
+
+    public bool IsAdmin()
+    {
+        return Header.IsSetField(Tags.MsgType) && IsAdminMsgType(Header.GetString(Tags.MsgType));
+    }
+
+    public bool IsApp()
+    {
+        return Header.IsSetField(Tags.MsgType) && !IsAdminMsgType(Header.GetString(Tags.MsgType));
+    }
+
+    /// <summary>
+    /// FIXME less operator new
+    /// </summary>
+    /// <param name="sessionId"></param>
+    public void SetSessionID(SessionID sessionId)
+    {
+        Header.SetField(new BeginString(sessionId.BeginString));
+        Header.SetField(new SenderCompID(sessionId.SenderCompID));
+        if (SessionID.IsSet(sessionId.SenderSubID))
+            Header.SetField(new SenderSubID(sessionId.SenderSubID));
+        if (SessionID.IsSet(sessionId.SenderLocationID))
+            Header.SetField(new SenderLocationID(sessionId.SenderLocationID));
+        Header.SetField(new TargetCompID(sessionId.TargetCompID));
+        if (SessionID.IsSet(sessionId.TargetSubID))
+            Header.SetField(new TargetSubID(sessionId.TargetSubID));
+        if (SessionID.IsSet(sessionId.TargetLocationID))
+            Header.SetField(new TargetLocationID(sessionId.TargetLocationID));
+    }
+
+    public SessionID GetSessionID(Message m)
+    {
+        bool isSetSenderSubId = m.Header.IsSetField(Tags.SenderSubID);
+        bool isSetSenderLocationId = m.Header.IsSetField(Tags.SenderLocationID);
+        bool isSetTargetSubId = m.Header.IsSetField(Tags.TargetSubID);
+        bool isSetTargetLocationId = m.Header.IsSetField(Tags.TargetLocationID);
+
+        if (isSetSenderSubId && isSetSenderLocationId && isSetTargetSubId && isSetTargetLocationId)
+            return new SessionID(m.Header.GetString(Tags.BeginString),
+                m.Header.GetString(Tags.SenderCompID), m.Header.GetString(Tags.SenderSubID), m.Header.GetString(Tags.SenderLocationID),
+                m.Header.GetString(Tags.TargetCompID), m.Header.GetString(Tags.TargetSubID), m.Header.GetString(Tags.TargetLocationID));
+
+        if (isSetSenderSubId && isSetTargetSubId)
+            return new SessionID(m.Header.GetString(Tags.BeginString),
+                m.Header.GetString(Tags.SenderCompID), m.Header.GetString(Tags.SenderSubID),
+                m.Header.GetString(Tags.TargetCompID), m.Header.GetString(Tags.TargetSubID));
+
+        return new SessionID(
+            m.Header.GetString(Tags.BeginString),
+            m.Header.GetString(Tags.SenderCompID),
+            m.Header.GetString(Tags.TargetCompID));
+    }
+
+    private readonly Object _lockConstructString = new Object();
+    /// <summary>
+    /// Update BodyLength in Header, update CheckSum in Trailer, and return a FIX string.
+    /// (This function changes the object state!)
+    /// </summary>
+    /// <returns></returns>
+    public string ConstructString()
+    {
+        lock (_lockConstructString)
+        {
+            Header.SetField(new BodyLength(BodyLength()), true);
+            Trailer.SetField(new CheckSum(Fields.Converters.CheckSumConverter.Convert(CheckSum())), true);
+
+            return Header.CalculateString() + CalculateString() + Trailer.CalculateString();
+        }
+    }
+
+    /// <summary>
+    /// Create a FIX-style string from the message.
+    /// This does NOT add/update BodyLength or CheckSum to the message header, or otherwise change the object state.
+    /// (Use <see cref="ConstructString"/> to compute and add/update BodyLength &amp; CheckSum.)
+    /// </summary>
+    /// <returns></returns>
+    public override string ToString() {
+        return Header.CalculateString() + CalculateString() + Trailer.CalculateString();
+    }
+
+    protected int BodyLength()
+    {
+        return Header.CalculateLength() + CalculateLength() + Trailer.CalculateLength();
+    }
+
+    private static string FieldMapToXml(DD? dd, FieldMap fields)
+    {
+        using PooledStringBuilder pooledSb = new PooledStringBuilder();
+        StringBuilder s = pooledSb.Builder;
+
+        // fields
+        foreach (var f in fields)
+        {
+           s.Append("<field ");
+           if (dd is not null && dd.FieldsByTag.TryGetValue(f.Key, out var value))
+           {
+               s.Append("name=\"").Append(value.Name).Append("\" ");
+           }
+           s.Append("number=\"").Append(f.Key).Append("\">");
+           s.Append("<![CDATA[").Append(f.Value).Append("]]>");
+           s.Append("</field>");
+        }
+        // now groups
+        List<int> groupTags = fields.GetGroupTags();
+        foreach (int groupTag in groupTags)
+        {
+            for (int counter = 1; counter <= fields.GroupCount(groupTag); counter++)
+            {
+                s.Append("<group>");
+                s.Append(FieldMapToXml(dd, fields.GetGroup(counter, groupTag)));
+                s.Append("</group>");
+            }
+        }
+
+        return s.ToString();
+    }
+
+
+    /// <summary>
+    /// ToJSON() helper method.
+    /// </summary>
+    /// <returns>a JSON string</returns>
+    private static void FieldMapToJson(Utf8JsonWriter writer, DD? dd, FieldMap fields, bool humanReadableValues, List<int>? tagsToMask, string maskText)
+    {
+        IList<int> numInGroupTagList = fields.GetGroupTags();
+        IList<IField> numInGroupFieldList = new List<IField>();
+
+        // Non-Group Fields
+        foreach (var (_, field) in fields)
+        {
+            if (QuickFix.Fields.CheckSum.TAG == field.Tag)
+                continue; // FIX JSON Encoding does not include CheckSum
+
+            if (numInGroupTagList.Contains(field.Tag))
+            {
+                numInGroupFieldList.Add(field);
+                continue; // Groups will be handled below
+            }
+
+            if (dd is not null && dd.FieldsByTag.TryGetValue(field.Tag, out DDField? ddField))
+            {
+                writer.WritePropertyName(ddField.Name);
+
+                if (tagsToMask != null && tagsToMask.Contains(field.Tag))
+                {
+                    writer.WriteStringValue(maskText);
+                }
+                else if (humanReadableValues)
+                {
+                    if (dd.FieldsByTag[field.Tag].EnumDict.TryGetValue(field.ToString(), out var valueDescription))
+                        writer.WriteStringValue(valueDescription);
+                    else
+                        writer.WriteStringValue(field.ToString());
+                }
+                else
+                {
+                    writer.WriteStringValue(field.ToString());
+                }
+            }
+            else
+            {
+                writer.WritePropertyName(field.Tag.ToString());
+                writer.WriteStringValue(field.ToString());
+            }
+        }
+
+        // Group Fields
+        foreach(IField numInGroupField in numInGroupFieldList)
+        {
+            // The name of the NumInGroup field is the key of the JSON list containing the Group items
+            if (dd is not null && dd.FieldsByTag.TryGetValue(numInGroupField.Tag, out DDField? field))
+                writer.WriteStartArray(field.Name);
+            else
+                writer.WriteStartArray(numInGroupField.Tag.ToString());
+
+            // Populate the JSON list with the Group items
+            for (int counter = 1; counter <= fields.GroupCount(numInGroupField.Tag); counter++)
+            {
+                writer.WriteStartObject();
+                FieldMapToJson(writer, dd, fields.GetGroup(counter, numInGroupField.Tag), humanReadableValues, tagsToMask, maskText);
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
+        }
+    }
+
+    /// <summary>
+    /// Get a representation of the message as an XML string.
+    /// (NOTE: this is just an ad-hoc XML; it is NOT FIXML.)
+    /// </summary>
+    /// <param name="dataDictionary">if null, then field names cannot and will not be in the output</param>
+    /// <returns>an XML string</returns>
+    public string ToXML(DD? dataDictionary = null)
+    {
+        using PooledStringBuilder pooledSb = new PooledStringBuilder();
+        StringBuilder s = pooledSb.Builder;
+        s.Append("<message>");
+        s.Append("<header>");
+        s.Append(FieldMapToXml(dataDictionary, Header));
+        s.Append("</header>");
+        s.Append("<body>");
+        s.Append(FieldMapToXml(dataDictionary, this));
+        s.Append("</body>");
+        s.Append("<trailer>");
+        s.Append(FieldMapToXml(dataDictionary, Trailer));
+        s.Append("</trailer>");
+        s.Append("</message>");
+        return s.ToString();
+    }
+
+    /// <summary>
+    /// Get a representation of the message as a string in FIX JSON Encoding.
+    /// See: https://github.com/FIXTradingCommunity/fix-json-encoding-spec
+    ///
+    /// Per the FIX JSON Encoding spec, tags are converted to human-readable form, but values are not.
+    /// </summary>
+    /// <param name="dataDictionary">Needed if you want tag names emitted or humanReadableValues to work</param>
+    /// <param name="convertEnumsToDescriptions">
+    ///   True will cause enums to be converted to their description strings, but only if dataDictionary is provided.
+    ///   If true and dataDictionary is null, then throws an ArgumentNullException.
+    /// </param>
+    /// <param name="tagsToMask">Optional list containing field tags to mask from FIX JSON output</param>
+    /// <param name="maskText">Text to use in place of masked values. Defaults to '[HIDDEN]'</param>
+    /// <returns>a JSON string</returns>
+    public string ToJSON(DD? dataDictionary = null, bool convertEnumsToDescriptions = false, List<int>? tagsToMask = null, string maskText = "[HIDDEN]") {
+        if (convertEnumsToDescriptions && dataDictionary is null) {
+            throw new ArgumentNullException(
+                nameof(dataDictionary),
+                $"Must be non-null if '{nameof(convertEnumsToDescriptions)}' is true.");
+        }
+
+        using MemoryStream stream = new();
+        using Utf8JsonWriter writer = new(stream);
+
+        writer.WriteStartObject();
+        writer.WriteStartObject("Header");
+
+        FieldMapToJson(writer, dataDictionary, Header, convertEnumsToDescriptions, tagsToMask, maskText);
+
+        writer.WriteEndObject();
+        writer.WriteStartObject("Body");
+
+        FieldMapToJson(writer, dataDictionary, this, convertEnumsToDescriptions, tagsToMask, maskText);
+
+        writer.WriteEndObject();
+        writer.WriteStartObject("Trailer");
+
+        FieldMapToJson(writer, dataDictionary, Trailer, convertEnumsToDescriptions, tagsToMask, maskText);
+
+        writer.WriteEndObject();
+        writer.WriteEndObject();
+        writer.Flush();
+
+        return Encoding.UTF8.GetString(stream.GetBuffer(), 0, (int)stream.Length);
     }
 }

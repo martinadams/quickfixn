@@ -1,171 +1,193 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
-using System.Threading;
-using System;
+using Microsoft.Extensions.Logging;
+using QuickFix.Logger;
 
-namespace QuickFix
+namespace QuickFix;
+
+// TODO v2.0 - consider changing to internal
+
+/// <summary>
+/// Handles incoming connections on a single endpoint. When a socket connection
+/// is accepted, a ClientHandlerThread is created to handle the connection
+/// </summary>
+public class ThreadedSocketReactor
 {
-    // TODO v2.0 - consider changing to internal
+    public enum State { RUNNING, SHUTDOWN_REQUESTED, SHUTDOWN_COMPLETE }
+
+    public State ReactorState => _state;
 
     /// <summary>
-    /// Handles incoming connections on a single endpoint. When a socket connection
-    /// is accepted, a ClientHandlerThread is created to handle the connection
+    /// Gets a value indicating whether this instance is running.
     /// </summary>
-    public class ThreadedSocketReactor
+    /// <value>
+    /// <c>true</c> if this instance is running; otherwise, <c>false</c>.
+    /// </value>
+    public bool IsRunning => ReactorState == State.RUNNING;
+
+    private readonly object _sync = new ();
+    private State _state = State.SHUTDOWN_COMPLETE;
+    private long _nextClientId = 0;
+    private readonly Dictionary<long, ClientHandlerThread> _clientThreads = new ();
+    private readonly TcpListener _tcpListener;
+    private readonly SocketSettings _socketSettings;
+    private readonly AcceptorSocketDescriptor? _acceptorSocketDescriptor;
+    private readonly ILogger _nonSessionLog;
+    private readonly IQuickFixLoggerFactory _loggerFactory;
+
+    internal ThreadedSocketReactor(
+        IPEndPoint serverSocketEndPoint,
+        SocketSettings socketSettings,
+        AcceptorSocketDescriptor? acceptorSocketDescriptor,
+        IQuickFixLoggerFactory loggerFactory)
     {
-        public enum State { RUNNING, SHUTDOWN_REQUESTED, SHUTDOWN_COMPLETE }
+        _socketSettings = socketSettings;
+        _tcpListener = new TcpListener(serverSocketEndPoint);
+        _acceptorSocketDescriptor = acceptorSocketDescriptor;
+        _loggerFactory = loggerFactory;
+        _nonSessionLog = loggerFactory.CreateNonSessionLogger<ThreadedSocketReactor>();
+    }
 
-        #region Properties
-
-        public State ReactorState
+    public void Start()
+    {
+        lock (_sync)
         {
-            get { lock (sync_) { return state_; } }
-        }
-
-        #endregion
-
-        #region Private Members
-
-        private object sync_ = new object();
-        private State state_ = State.RUNNING;
-        private long nextClientId_ = 0;
-        private Thread serverThread_ = null;
-        private Dictionary<long, ClientHandlerThread> clientThreads_ = new Dictionary<long, ClientHandlerThread>();
-        private TcpListener tcpListener_;
-        private SocketSettings socketSettings_;
-        private QuickFix.Dictionary sessionDict_;
-
-        #endregion
-
-        [Obsolete("Use the other constructor")]
-        public ThreadedSocketReactor(IPEndPoint serverSocketEndPoint, SocketSettings socketSettings)
-            : this(serverSocketEndPoint, socketSettings, null)
-        { }
-        
-        public ThreadedSocketReactor(IPEndPoint serverSocketEndPoint, SocketSettings socketSettings, QuickFix.Dictionary sessionDict)
-        {
-            socketSettings_ = socketSettings;
-            tcpListener_ = new TcpListener(serverSocketEndPoint);
-            sessionDict_ = sessionDict;
-        }
-
-        public void Start()
-        {
-            serverThread_ = new Thread(new ThreadStart(Run));
-            serverThread_.Start();
-        }
-
-        public void Shutdown()
-        {
-            lock (sync_)
-            {
-                if (State.RUNNING == state_)
-                {
-                    try
-                    {
-                        state_ = State.SHUTDOWN_REQUESTED;
-                        tcpListener_.Server.Close();
-                        tcpListener_.Stop();
-                    }
-                    catch (System.Exception e)
-                    {
-                        this.Log("Error while closing server socket: " + e.Message);
-                    }
-                }
-            }
-        }
-
-        /// <summary>
-        /// TODO apply networking options, e.g. NO DELAY, LINGER, etc.
-        /// </summary>
-        public void Run()
-        {
-            tcpListener_.Start();
-            while (State.RUNNING == ReactorState)
+            if( State.SHUTDOWN_COMPLETE == _state )
             {
                 try
                 {
-                    TcpClient client = tcpListener_.AcceptTcpClient();
-                    ApplySocketOptions(client, socketSettings_);
-                    ClientHandlerThread t = new ClientHandlerThread(client, nextClientId_++, sessionDict_, socketSettings_);
-                    t.Exited += OnClientHandlerThreadExited;
-                    lock (sync_)
-                    {
-                        clientThreads_.Add(t.Id, t);
-                    }
-                    // FIXME set the client thread's exception handler here
-                    t.Log("connected");
-                    t.Start();
+                    _tcpListener.Start();
+                    _state = State.RUNNING;
+                    _tcpListener.BeginAcceptTcpClient(AcceptTcpClientCallback, _tcpListener);
                 }
-                catch (System.Exception e)
-                {
-                    if (State.RUNNING == ReactorState)
-                        this.Log("Error accepting connection: " + e.Message);
+                catch (Exception e) {
+                    _nonSessionLog.Log(LogLevel.Error, e, "Error starting listener");
+                    throw;
                 }
             }
-            ShutdownClientHandlerThreads();
         }
+    }
 
-        internal void OnClientHandlerThreadExited(object sender, ClientHandlerThread.ExitedEventArgs e)
+    public void Shutdown()
+    {
+        lock (_sync)
         {
-            lock(sync_)
+            if (IsRunning)
             {
-                ClientHandlerThread t = null;
-                if(clientThreads_.TryGetValue(e.ClientHandlerThread.Id, out t))
+                try
                 {
-                    clientThreads_.Remove(t.Id);
+                    _state = State.SHUTDOWN_REQUESTED;
+                    _tcpListener.Server.Close();
+                    _tcpListener.Stop();
+                    ShutdownClientHandlerThreads();
+                }
+                catch (Exception e)
+                {
+                    _nonSessionLog.Log(LogLevel.Error, e, "Error while closing server socket");
+                }
+            }
+        }
+    }
+
+    private void AcceptTcpClientCallback( IAsyncResult ar )
+    {
+        // If socket is in process of shutting down then a client may
+        // still be able to connect until it has shutdown
+        // but really we don't want to do anything with the connection so just ignore it
+        if (!IsRunning)
+            return;
+
+        TcpListener listener = (TcpListener)ar.AsyncState!;
+        try
+        {
+            TcpClient client = listener.EndAcceptTcpClient(ar);
+            ApplySocketOptions(client, _socketSettings);
+            ClientHandlerThread t = new ClientHandlerThread(
+                client, _nextClientId++, _socketSettings, _acceptorSocketDescriptor, _loggerFactory);
+            t.Exited += OnClientHandlerThreadExited;
+            lock (_sync)
+            {
+                _clientThreads.Add(t.Id, t);
+            }
+            // FIXME set the client thread's exception handler here
+            t.Start();
+        }
+        catch (Exception e)
+        {
+            if (IsRunning)
+                _nonSessionLog.Log(LogLevel.Error, e, "Error accepting connection");
+        }
+        if( IsRunning )
+        {
+            listener.BeginAcceptTcpClient( AcceptTcpClientCallback, listener );
+        }
+    }
+
+
+    internal void OnClientHandlerThreadExited(object sender, ClientHandlerThread.ExitedEventArgs e)
+    {
+        lock(_sync)
+        {
+            if(_clientThreads.TryGetValue(e.ClientHandlerThread.Id, out var t))
+            {
+                _clientThreads.Remove(t.Id);
+                t.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Apply socket options from settings
+    /// </summary>
+    /// <param name="client"></param>
+    /// <param name="socketSettings"></param>
+    public static void ApplySocketOptions(TcpClient client, SocketSettings socketSettings)
+    {
+        client.LingerState = new LingerOption(false, 0);
+        client.NoDelay = socketSettings.SocketNodelay;
+        if (socketSettings.SocketReceiveBufferSize.HasValue)
+        {
+            client.ReceiveBufferSize = socketSettings.SocketReceiveBufferSize.Value;
+        }
+        if (socketSettings.SocketSendBufferSize.HasValue)
+        {
+            client.SendBufferSize = socketSettings.SocketSendBufferSize.Value;
+        }
+        if (socketSettings.SocketReceiveTimeout.HasValue)
+        {
+            client.ReceiveTimeout = socketSettings.SocketReceiveTimeout.Value;
+        }
+        if (socketSettings.SocketSendTimeout.HasValue)
+        {
+            client.SendTimeout = socketSettings.SocketSendTimeout.Value;
+        }
+    }
+
+    private void ShutdownClientHandlerThreads()
+    {
+        lock (_sync)
+        {
+            if (State.SHUTDOWN_COMPLETE != _state)
+            {
+                foreach (ClientHandlerThread t in _clientThreads.Values)
+                {
+                    t.Exited -= OnClientHandlerThreadExited;
+                    t.Shutdown("reactor is shutting down");
+                    try
+                    {
+                        t.Join();
+                    }
+                    catch (Exception e)
+                    {
+                        _nonSessionLog.Log(LogLevel.Error, e, "Error shutting down");
+                    }
                     t.Dispose();
-                    t = null;
                 }
+                _clientThreads.Clear();
+                _state = State.SHUTDOWN_COMPLETE;
             }
-        }
-
-        /// <summary>
-        /// FIXME get socket options from SessionSettings
-        /// </summary>
-        /// <param name="client"></param>
-        public static void ApplySocketOptions(TcpClient client, SocketSettings socketSettings)
-        {
-            client.LingerState = new LingerOption(false, 0);
-            client.NoDelay = socketSettings.SocketNodelay;
-        }
-
-        private void ShutdownClientHandlerThreads()
-        {
-            lock (sync_)
-            {
-                if (State.SHUTDOWN_COMPLETE != state_)
-                {
-                    this.Log("shutting down...");
-
-                    foreach (ClientHandlerThread t in clientThreads_.Values)
-                    {
-                        t.Exited -= OnClientHandlerThreadExited;
-                        t.Shutdown("reactor is shutting down");
-                        try
-                        {
-                            t.Join();
-                        }
-                        catch (System.Exception e)
-                        {
-                            t.Log("Error shutting down: " + e.Message);
-                        }
-                        t.Dispose();
-                    }
-                    clientThreads_.Clear();
-                    state_ = State.SHUTDOWN_COMPLETE;
-                }
-            }
-        }
-
-        /// <summary>
-        /// FIXME do real logging
-        /// </summary>
-        /// <param name="s"></param>
-        private void Log(string s)
-        {
-            System.Console.WriteLine(s);
         }
     }
 }

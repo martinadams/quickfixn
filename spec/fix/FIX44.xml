@@ -82,6 +82,9 @@
       <field name="EncodedTextLen" required="N" />
       <field name="EncodedText" required="N" />
     </message>
+    <message name="XMLnonFIX" msgtype="n" msgcat="admin">
+      <!-- this message has no body fields -->
+    </message>
     <message name="BusinessMessageReject" msgtype="j" msgcat="app">
       <field name="RefSeqNum" required="N" />
       <field name="RefMsgType" required="Y" />
@@ -191,7 +194,7 @@
       <group name="NoUnderlyings" required="N">
         <component name="UnderlyingInstrument" required="N" />
       </group>
-      <group name="LinesOfText" required="Y">
+      <group name="LinesOfText" required="N">
         <field name="Text" required="Y" />
         <field name="EncodedTextLen" required="N" />
         <field name="EncodedText" required="N" />
@@ -222,7 +225,7 @@
       </group>
       <field name="OrderID" required="N" />
       <field name="ClOrdID" required="N" />
-      <group name="LinesOfText" required="Y">
+      <group name="LinesOfText" required="N">
         <field name="Text" required="Y" />
         <field name="EncodedTextLen" required="N" />
         <field name="EncodedText" required="N" />
@@ -4160,7 +4163,7 @@
       <value enum="k" description="BID_REQUEST" />
       <value enum="l" description="BID_RESPONSE" />
       <value enum="m" description="LIST_STRIKE_PRICE" />
-      <value enum="n" description="XML_MESSAGE" />
+      <value enum="n" description="XML_NON_FIX" />
       <value enum="o" description="REGISTRATION_INSTRUCTIONS" />
       <value enum="p" description="REGISTRATION_INSTRUCTIONS_RESPONSE" />
       <value enum="q" description="ORDER_MASS_CANCEL_REQUEST" />
@@ -5262,7 +5265,7 @@
     <field number="379" name="BusinessRejectRefID" type="STRING" />
     <field number="380" name="BusinessRejectReason" type="INT">
       <value enum="0" description="OTHER" />
-      <value enum="1" description="UNKOWN_ID" />
+      <value enum="1" description="UNKNOWN_ID" />
       <value enum="2" description="UNKNOWN_SECURITY" />
       <value enum="3" description="UNSUPPORTED_MESSAGE_TYPE" />
       <value enum="4" description="APPLICATION_NOT_AVAILABLE" />

@@ -1,172 +1,237 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+using System.IO;
 using NUnit.Framework;
 using System.Threading;
+using QuickFix.Store;
 
-namespace UnitTests
+namespace UnitTests;
+
+[TestFixture]
+public class FileStoreTests
 {
-    [TestFixture]
-    public class FileStoreTests
+    private FileStore? _store;
+    private FileStoreFactory? _factory;
+
+    private QuickFix.SessionSettings _settings = new();
+    private QuickFix.SessionID _sessionId = new("unset", "unset", "unset");
+
+    private string _storeDirectory = "unset";
+
+    [SetUp]
+    public void Setup()
     {
-        QuickFix.FileStore store;
-        QuickFix.FileStoreFactory factory;
+        _storeDirectory = Path.Combine(TestContext.CurrentContext.TestDirectory, "store");
 
-        QuickFix.SessionSettings settings;
-        QuickFix.SessionID sessionID;
+        if (System.IO.Directory.Exists(_storeDirectory))
+            System.IO.Directory.Delete(_storeDirectory, true);
 
-        [SetUp]
-        public void setup()
-        {
-            if (System.IO.Directory.Exists("store"))
-                System.IO.Directory.Delete("store", true);
+        _sessionId = new QuickFix.SessionID("FIX.4.2", "SENDERCOMP", "TARGETCOMP");
 
-            sessionID = new QuickFix.SessionID("FIX.4.2", "SENDERCOMP", "TARGETCOMP");
+        QuickFix.SettingsDictionary config = new QuickFix.SettingsDictionary();
+        config.SetString(QuickFix.SessionSettings.CONNECTION_TYPE, "initiator");
+        config.SetString(QuickFix.SessionSettings.FILE_STORE_PATH, _storeDirectory);
 
-            QuickFix.Dictionary config = new QuickFix.Dictionary();
-            config.SetString(QuickFix.SessionSettings.CONNECTION_TYPE, "initiator");
-            config.SetString(QuickFix.SessionSettings.FILE_STORE_PATH, "store");
+        _settings = new QuickFix.SessionSettings();
+        _settings.Set(_sessionId, config);
+        _factory = new FileStoreFactory(_settings);
 
-            settings = new QuickFix.SessionSettings();
-            settings.Set(sessionID, config);
-            factory = new QuickFix.FileStoreFactory(settings);
+        _store = (FileStore)_factory.Create(_sessionId);
+    }
 
-            store = (QuickFix.FileStore)factory.Create(sessionID);
-        }
-
-        void rebuildStore()
-        {
-            if(store != null)
-            {
-                store.Dispose();
-            }
-
-            store = (QuickFix.FileStore)factory.Create(sessionID);
-        }
+    void RebuildStore()
+    {
+        _store?.Dispose();
+        _store = (FileStore)_factory!.Create(_sessionId);
+    }
 
 
-        [TearDown]
-        public void teardown()
-        {
-            store.Dispose();
-        }
+    [TearDown]
+    public void Teardown()
+    {
+        _store!.Dispose();
+        Directory.Delete(_storeDirectory, true);
+    }
 
-        [Test]
-        public void testPrefixForSessionWithSubsAndLoc()
-        {
-            QuickFix.SessionID sessionIDWithSubsAndLocation = new QuickFix.SessionID("FIX.4.2", "SENDERCOMP", "SENDERSUB", "SENDERLOC", "TARGETCOMP", "TARGETSUB", "TARGETLOC");
-            Assert.That(QuickFix.FileStore.Prefix(sessionIDWithSubsAndLocation), Is.EqualTo("FIX.4.2-SENDERCOMP_SENDERSUB_SENDERLOC-TARGETCOMP_TARGETSUB_TARGETLOC"));
+    [Test]
+    public void TestPrefixForSessionWithSubsAndLoc()
+    {
+        QuickFix.SessionID sessionIDWithSubsAndLocation = new QuickFix.SessionID("FIX.4.2", "SENDERCOMP", "SENDERSUB", "SENDERLOC", "TARGETCOMP", "TARGETSUB", "TARGETLOC");
+        Assert.That(FileStore.Prefix(sessionIDWithSubsAndLocation), Is.EqualTo("FIX.4.2-SENDERCOMP_SENDERSUB_SENDERLOC-TARGETCOMP_TARGETSUB_TARGETLOC"));
 
-            QuickFix.SessionID sessionIDWithSubsNoLocation = new QuickFix.SessionID("FIX.4.2", "SENDERCOMP", "SENDERSUB", "TARGETCOMP", "TARGETSUB");
-            Assert.That(QuickFix.FileStore.Prefix(sessionIDWithSubsNoLocation), Is.EqualTo("FIX.4.2-SENDERCOMP_SENDERSUB-TARGETCOMP_TARGETSUB"));
-        }
+        QuickFix.SessionID sessionIDWithSubsNoLocation = new QuickFix.SessionID("FIX.4.2", "SENDERCOMP", "SENDERSUB", "TARGETCOMP", "TARGETSUB");
+        Assert.That(FileStore.Prefix(sessionIDWithSubsNoLocation), Is.EqualTo("FIX.4.2-SENDERCOMP_SENDERSUB-TARGETCOMP_TARGETSUB"));
+    }
 
-        [Test]
-        public void generateFileNamesTest()
-        {
-            Assert.That(System.IO.File.Exists("store/FIX.4.2-SENDERCOMP-TARGETCOMP.seqnums"));
-            Assert.That(System.IO.File.Exists("store/FIX.4.2-SENDERCOMP-TARGETCOMP.body"));
-            Assert.That(System.IO.File.Exists("store/FIX.4.2-SENDERCOMP-TARGETCOMP.header"));
-            Assert.That(System.IO.File.Exists("store/FIX.4.2-SENDERCOMP-TARGETCOMP.session"));
-        }
+    [Test]
+    public void GenerateFileNamesTest()
+    {
+        Assert.That(System.IO.File.Exists(Path.Combine(_storeDirectory, "FIX.4.2-SENDERCOMP-TARGETCOMP.seqnums")));
+        Assert.That(System.IO.File.Exists(Path.Combine(_storeDirectory, "FIX.4.2-SENDERCOMP-TARGETCOMP.body")));
+        Assert.That(System.IO.File.Exists(Path.Combine(_storeDirectory, "FIX.4.2-SENDERCOMP-TARGETCOMP.header")));
+        Assert.That(System.IO.File.Exists(Path.Combine(_storeDirectory, "FIX.4.2-SENDERCOMP-TARGETCOMP.session")));
+    }
 
-        [Test]
-        public void getNextSenderMsgSeqNumTest()
-        {
-            Assert.AreEqual(1, store.GetNextSenderMsgSeqNum());
-            store.SetNextSenderMsgSeqNum(5);
-            Assert.AreEqual(5, store.GetNextSenderMsgSeqNum());
-            rebuildStore();
-            Assert.AreEqual(5, store.GetNextSenderMsgSeqNum());
-        }
+    [Test]
+    public void NextSenderMsgSeqNumTest()
+    {
+        Assert.That(_store!.NextSenderMsgSeqNum, Is.EqualTo(1));
+        _store.NextSenderMsgSeqNum = 5;
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(5));
+        RebuildStore();
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(5));
+    }
 
-        [Test]
-        public void incNextSenderMsgSeqNumTest()
-        {
-            store.IncrNextSenderMsgSeqNum();
-            Assert.AreEqual(2, store.GetNextSenderMsgSeqNum());
-            rebuildStore();
-            Assert.AreEqual(2, store.GetNextSenderMsgSeqNum());
-        }
+    [Test]
+    public void IncNextSenderMsgSeqNumTest()
+    {
+        _store!.IncrNextSenderMsgSeqNum();
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(2));
+        RebuildStore();
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(2));
+    }
 
-        [Test]
-        public void getNextTargetMsgSeqNumTest()
-        {
-            Assert.AreEqual(1, store.GetNextTargetMsgSeqNum());
-            store.SetNextTargetMsgSeqNum(6);
-            Assert.AreEqual(6, store.GetNextTargetMsgSeqNum());
-            rebuildStore();
-            Assert.AreEqual(6, store.GetNextTargetMsgSeqNum());
-        }
+    [Test]
+    public void NextTargetMsgSeqNumTest()
+    {
+        Assert.That(_store!.NextTargetMsgSeqNum, Is.EqualTo(1));
+        _store.NextTargetMsgSeqNum = 6;
+        Assert.That(_store.NextTargetMsgSeqNum, Is.EqualTo(6));
+        RebuildStore();
+        Assert.That(_store.NextTargetMsgSeqNum, Is.EqualTo(6));
+    }
 
-        [Test]
-        public void incNextTargetMsgSeqNumTest()
-        {
-            store.IncrNextTargetMsgSeqNum();
-            Assert.AreEqual(2, store.GetNextTargetMsgSeqNum());
-            rebuildStore();
-            Assert.AreEqual(2, store.GetNextTargetMsgSeqNum());
-        }
+    [Test]
+    public void IncNextTargetMsgSeqNumTest()
+    {
+        _store!.IncrNextTargetMsgSeqNum();
+        Assert.That(_store.NextTargetMsgSeqNum, Is.EqualTo(2));
+        RebuildStore();
+        Assert.That(_store.NextTargetMsgSeqNum, Is.EqualTo(2));
+    }
 
-        [Test]
-        public void resetTest()
-        {
-            // seq nums reset
-            store.SetNextTargetMsgSeqNum(5);
-            store.SetNextSenderMsgSeqNum(4);
-            store.Reset();
-            Assert.AreEqual(1, store.GetNextTargetMsgSeqNum());
-            Assert.AreEqual(1, store.GetNextSenderMsgSeqNum());
+    /// Using UInt64 seqnums per FIX Trading Community Continuous Markets Working Group recommendations.
+    [Test]
+    public void TestSeqNumLimitsForContinuousMarkets()
+    {
+        // Given the next seqnums are UInt64.MaxValue - 1
+        _store!.NextSenderMsgSeqNum = System.UInt64.MaxValue - 1;
+        _store.NextTargetMsgSeqNum = _store.NextSenderMsgSeqNum;
 
-            // Check that messages do not persist after reset
-            store.Set(1, "dude");
-            store.Set(2, "pude");
-            store.Set(3, "ok");
-            store.Set(4, "ohai");
+        // When the next seqnums are incremented
+        _store.IncrNextSenderMsgSeqNum();
+        _store.IncrNextTargetMsgSeqNum();
 
-            store.Reset();
+        // Then the next seqnums should be UInt64.MaxValue
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(System.UInt64.MaxValue));
+        Assert.That(_store.NextTargetMsgSeqNum, Is.EqualTo(System.UInt64.MaxValue));
 
-            var msgs = new List<string>();
-            store.Get(2, 3, msgs);
-            Assert.That(msgs,Is.Empty);
-        }
+        // When the store is reloaded from files
+        RebuildStore();
 
-        [Test]
-        public void CreationTimeTest()
-        {
-            DateTime d1 = store.CreationTime.Value;
-            rebuildStore();
-            DateTime d2 = store.CreationTime.Value;
-            Util.UtcDateTimeSerializerTests.AssertHackyDateTimeEquality(d1, d2);
+        // Then the next seqnums should still be UInt64.MaxValue
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(System.UInt64.MaxValue));
+        Assert.That(_store.NextTargetMsgSeqNum, Is.EqualTo(System.UInt64.MaxValue));
 
-            Thread.Sleep(1000);
-            store.Reset();
-            DateTime d3 = store.CreationTime.Value;
-            Assert.AreEqual(-1, DateTimeOffset.Compare(d1, d3)); // e.g. d1 is earlier than d3
-        }
+        // When the next seqnums are incremented again
+        _store.IncrNextSenderMsgSeqNum();
+        _store.IncrNextTargetMsgSeqNum();
+
+        // Then the next seqnums should overflow to zero
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(0));
+        Assert.That(_store.NextTargetMsgSeqNum, Is.EqualTo(0));
+
+        // When the store is reloaded from files
+        RebuildStore();
+
+        // Then the next seqnums should still be zero
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(0));
+        Assert.That(_store.NextTargetMsgSeqNum, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void ResetTest()
+    {
+        // seq nums reset
+        _store!.NextTargetMsgSeqNum = 5;
+        _store.NextSenderMsgSeqNum = 4;
+        _store.Reset();
+        Assert.That(_store.NextTargetMsgSeqNum, Is.EqualTo(1));
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(1));
+
+        // Check that messages do not persist after reset
+        _store.Set(1, "dude");
+        _store.Set(2, "pude");
+        _store.Set(3, "ok");
+        _store.Set(4, "ohai");
+
+        _store.Reset();
+
+        var msgs = new List<string>();
+        _store.Get(2, 3, msgs);
+        Assert.That(msgs,Is.Empty);
+    }
+
+    [Test]
+    public void CreationTimeTest()
+    {
+        DateTime d1 = _store!.CreationTime!.Value;
+        RebuildStore();
+        DateTime d2 = _store.CreationTime.Value;
+        Util.UtcDateTimeSerializerTests.AssertHackyDateTimeEquality(d1, d2);
+
+        Thread.Sleep(1000);
+        _store.Reset();
+        DateTime d3 = _store.CreationTime.Value;
+        Assert.That(DateTimeOffset.Compare(d1, d3), Is.EqualTo(-1)); // e.g. d1 is earlier than d3
+    }
 
 
-        [Test]
-        public void getTest()
-        {
-            store.Set(1, "dude");
-            store.Set(2, "pude");
-            store.Set(3, "ok");
-            store.Set(4, "ohai");
+    [Test]
+    public void GetTest()
+    {
+        _store!.Set(1, "dude");
+        _store.Set(2, "pude");
+        _store.Set(3, "ok");
+        _store.Set(4, "ohai");
 
-            var msgs = new List<string>();
-            store.Get(2, 3, msgs);
-            var expected = new List<string>() { "pude", "ok" };
+        var msgs = new List<string>();
+        _store.Get(2, 3, msgs);
+        var expected = new List<string>() { "pude", "ok" };
 
-            Assert.AreEqual(expected, msgs);
+        Assert.That(msgs, Is.EqualTo(expected));
 
-            rebuildStore();
+        RebuildStore();
 
-            msgs = new List<string>();
-            store.Get(2, 3, msgs);
+        msgs = new List<string>();
+        _store.Get(2, 3, msgs);
 
-            Assert.AreEqual(expected, msgs);
-        }
+        Assert.That(msgs, Is.EqualTo(expected));
+    }
+
+    [Test]
+    public void SetAndIncrNextSenderMsgSeqNumTest()
+    {
+        IMessageStore messageStore = _store ?? throw new InvalidProgramException();
+
+        messageStore.SetAndIncrNextSenderMsgSeqNum(1, "dude");
+        messageStore.SetAndIncrNextSenderMsgSeqNum(2, "pude");
+        messageStore.SetAndIncrNextSenderMsgSeqNum(3, "ok");
+        messageStore.SetAndIncrNextSenderMsgSeqNum(4, "ohai");
+
+        var msgs = new List<string>();
+        _store.Get(2, 3, msgs);
+        var expected = new List<string>() { "pude", "ok" };
+
+        Assert.That(msgs, Is.EqualTo(expected));
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(5));
+
+        RebuildStore();
+
+        msgs = new List<string>();
+        _store.Get(2, 3, msgs);
+
+        Assert.That(msgs, Is.EqualTo(expected));
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(5));
     }
 }

@@ -1,899 +1,919 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using System.Text.RegularExpressions;
-using NUnit.Framework;
 using System.Threading;
+using NUnit.Framework;
+using QuickFix.Fields;
+using QuickFix.Logger;
+using QuickFix.Store;
 
-namespace UnitTests
+namespace UnitTests;
+
+[TestFixture]
+public class SessionTest : SessionTestBase
 {
-    class MockResponder : QuickFix.IResponder
+    private readonly Regex _msRegex = new(@"\.[\d]{1,3}$");
+    private readonly Regex _microsecondRegex = new(@"\.[\d]{1,6}$");
+
+    [SetUp]
+    public void Setup()
     {
-
-        #region Responder Members
-        QuickFix.DefaultMessageFactory messageFactory = new QuickFix.DefaultMessageFactory();
-        
-        public Dictionary<string, Queue<QuickFix.Message>> msgLookup = new Dictionary<string, Queue<QuickFix.Message>>();
-        public Queue<QuickFix.Message> dups = new Queue<QuickFix.Message>();
-
-        private QuickFix.IMessageFactory _defaultMsgFactory = new QuickFix.DefaultMessageFactory();
-
-        public bool disconnected = false;
-
-        public bool Send(string msgStr)
-        {
-            QuickFix.Fields.MsgType msgType = QuickFix.Message.IdentifyType(msgStr);
-            string beginString = QuickFix.Message.ExtractBeginString(msgStr);
-
-            QuickFix.Message message = messageFactory.Create(beginString, msgType.Obj);
-            QuickFix.DataDictionary.DataDictionary dd = new QuickFix.DataDictionary.DataDictionary();
-            message.FromString(msgStr, false, dd, dd, _defaultMsgFactory);
-
-            if (!msgLookup.ContainsKey(msgType.getValue()))
-                msgLookup.Add(msgType.getValue(), new Queue<QuickFix.Message>());
-
-            msgLookup[msgType.getValue()].Enqueue(message);
-
-            QuickFix.Fields.PossDupFlag possDup = new QuickFix.Fields.PossDupFlag(false);
-            if (message.Header.IsSetField(possDup))
-                message.Header.GetField(possDup);
-
-            if (possDup.getValue() && msgType.getValue()!= QuickFix.Fields.MsgType.SEQUENCE_RESET)
-            {
-                dups.Enqueue(message);
-            }
-
-            return true;
-        }
-
-        public void Disconnect()
-        {
-            disconnected = true;
-        }
-
-        public void DumpMsgLookup()
-        {
-            Console.WriteLine("Responder dump:");
-            foreach (string key in msgLookup.Keys)
-            {
-                Console.WriteLine(String.Format("  {0}: count {1}", key, msgLookup[key].Count));
-                foreach (QuickFix.Message m in msgLookup[key])
-                {
-                    Console.WriteLine("  - " + m.ToString());
-                }
-            }
-        }
-
-        public int GetCount(string msgType)
-        {
-            return msgLookup.ContainsKey(msgType) ? msgLookup[msgType].Count : 0;
-        }
-
-        #endregion
+        BaseSetup();
     }
 
-    class MockApplication : QuickFix.IApplication
+    [Test]
+    public void ConditionalTagMissingReject()
     {
-        public System.Exception fromAppException = null;
-        public System.Exception fromAdminException = null;
-        public QuickFix.DoNotSend doNotSendException = null;
+        _application.FromAppException = new QuickFix.FieldNotFoundException(61);
 
-        #region Application Members
+        Logon();
+        SendNOSMessage();
 
-        public void ToAdmin(QuickFix.Message message, QuickFix.SessionID sessionID)
-        {
-        }
-
-        public void FromAdmin(QuickFix.Message message, QuickFix.SessionID sessionID)
-        {
-            if (fromAdminException != null)
-                throw fromAdminException;
-        }
-
-        public void ToApp(QuickFix.Message message, QuickFix.SessionID sessionId)
-        {
-            if (doNotSendException != null)
-                throw doNotSendException;
-            
-        }
-
-        public void FromApp(QuickFix.Message message, QuickFix.SessionID sessionID)
-        {
-            if (fromAppException != null)
-                throw fromAppException;
-        }
-
-        public void OnCreate(QuickFix.SessionID sessionID)
-        {
-
-        }
-
-        public void OnLogout(QuickFix.SessionID sessionID)
-        {
-            throw new NotImplementedException();
-        }
-
-        public void OnLogon(QuickFix.SessionID sessionID)
-        {
-        }
-        #endregion
+        Assert.That(SENT_BUSINESS_REJECT(QuickFix.Fields.BusinessRejectReason.CONDITIONALLY_REQUIRED_FIELD_MISSING));
     }
 
-    class MockApplicationExt : QuickFix.IApplicationExt
+    [Test]
+    public void IncorrectTagValueReject()
     {
-        public HashSet<string> InterceptedMessageTypes = new HashSet<string>();
+        _application.FromAppException = new QuickFix.IncorrectTagValue(54);
 
-        #region Application Members
-
-        public void ToAdmin(QuickFix.Message message, QuickFix.SessionID sessionID)
-        {
-        }
-
-        public void FromAdmin(QuickFix.Message message, QuickFix.SessionID sessionID)
-        {
-        }
-
-        public void ToApp(QuickFix.Message message, QuickFix.SessionID sessionId)
-        {
-        }
-
-        public void FromApp(QuickFix.Message message, QuickFix.SessionID sessionID)
-        {
-        }
-
-        public void OnCreate(QuickFix.SessionID sessionID)
-        {
-        }
-
-        public void OnLogout(QuickFix.SessionID sessionID)
-        {
-        }
-
-        public void OnLogon(QuickFix.SessionID sessionID)
-        {
-        }
-
-        public void FromEarlyIntercept(QuickFix.Message message, QuickFix.SessionID sessionID)
-        {
-            InterceptedMessageTypes.Add(message.Header.GetString(QuickFix.Fields.Tags.MsgType));
-        }
-        #endregion
-
+        Logon();
+        SendNOSMessage();
+        Assert.That(SENT_REJECT(QuickFix.Fields.SessionRejectReason.VALUE_IS_INCORRECT,54));
     }
 
-    [TestFixture]
-    public class SessionTest
+    [Test]
+    public void UnsupportedMessageReject()
     {
-        MockResponder responder = null;
+        _application.FromAppException = new QuickFix.UnsupportedMessageType();
 
-        QuickFix.SessionID sessionID = null;
-        QuickFix.SessionSettings settings = null;
-        MockApplication application = null;
-        QuickFix.Session session = null;
-        QuickFix.Session session2 = null;
-        QuickFix.Dictionary config = null;
-        int seqNum = 1;
-        Regex msRegex = new Regex(@"\.[\d]{1,3}$");
+        Logon();
+        SendNOSMessage();
+        Assert.That(SENT_BUSINESS_REJECT());
+    }
 
-        [SetUp]
-        public void setup()
+    [Test]
+    public void LogonReject()
+    {
+        _application.FromAdminException  = new QuickFix.RejectLogon("Failed Logon");
+        Logon();
+
+        Assert.That(SENT_LOGOUT());
+        Assert.That(DISCONNECTED());
+    }
+
+    [Test]
+    public void HeartBeatCheckAfterMessageProcess()
+    {
+        Logon();
+        Thread.Sleep(2000);
+
+        SendNOSMessage();
+        Assert.That(SENT_HEART_BEAT());
+    }
+
+    [Test]
+    public void NextResendRequestNoMessagePersist()
+    {
+        _session!.PersistMessages = false;
+
+        Logon(); //seq 1
+
+        for (int i = 0; i < 3; ++i)
         {
-            responder = new MockResponder();
-            sessionID = new QuickFix.SessionID("FIX.4.2", "SENDER", "TARGET");
-            application = new MockApplication();
-            settings = new QuickFix.SessionSettings();
-
-            config = new QuickFix.Dictionary();
-            config.SetBool(QuickFix.SessionSettings.PERSIST_MESSAGES, false);
-            config.SetString(QuickFix.SessionSettings.CONNECTION_TYPE, "initiator");
-            config.SetString(QuickFix.SessionSettings.START_TIME, "00:00:00");
-            config.SetString(QuickFix.SessionSettings.END_TIME, "00:00:00");
-            settings.Set(sessionID, config);
-
-            session = new QuickFix.Session(application, new QuickFix.MemoryStoreFactory(), sessionID, 
-                new QuickFix.DataDictionaryProvider(),new QuickFix.SessionSchedule(config), 0, new QuickFix.ScreenLogFactory(settings), new QuickFix.DefaultMessageFactory(), "blah");
-            session.SetResponder(responder);
-            session.CheckLatency = false;
-
-            // must be set for an initiator
-            int heartBeatInterval = 10;
-
-            session2 = new QuickFix.Session(application, new QuickFix.MemoryStoreFactory(), new QuickFix.SessionID("FIX.4.2", "OTHER_SENDER", "OTHER_TARGET"),
-                new QuickFix.DataDictionaryProvider(), new QuickFix.SessionSchedule(config), heartBeatInterval, new QuickFix.ScreenLogFactory(settings), new QuickFix.DefaultMessageFactory(), "blah");
-            session2.SetResponder(responder);
-            session2.CheckLatency = false;
-
-            seqNum = 1;
-        }
-
-        public void Logon()
-        {
-            SendLogon(new QuickFix.FIX42.Logon());
-        }
-
-        public void Logon40()
-        {
-            SendLogon(new QuickFix.FIX40.Logon());
-        }
-
-        private void SendLogon(QuickFix.Message msg)
-        {
-            msg.Header.SetField(new QuickFix.Fields.TargetCompID(sessionID.SenderCompID));
-            msg.Header.SetField(new QuickFix.Fields.SenderCompID(sessionID.TargetCompID));
-            msg.Header.SetField(new QuickFix.Fields.MsgSeqNum(seqNum++));
-            msg.Header.SetField(new QuickFix.Fields.SendingTime(System.DateTime.UtcNow));
-            msg.SetField(new QuickFix.Fields.HeartBtInt(1));
-            session.Next(msg.ToString());
-        }
-
-        public bool SENT_RESEND()
-        {
-            if (!responder.msgLookup.ContainsKey(QuickFix.Fields.MsgType.SEQUENCE_RESET) &&
-                responder.msgLookup[QuickFix.Fields.MsgType.SEQUENCE_RESET].Count > 0)
-                return false;
-
-            responder.msgLookup[QuickFix.Fields.MsgType.SEQUENCE_RESET].Dequeue();
-
-            return true;
-        }
-
-        public bool RESENT()
-        {
-            if (responder.dups.Count == 0)
-                return false;
-
-            responder.dups.Dequeue();
-            return true;
-        }
-
-        public bool SENT_REJECT()
-        {
-            return responder.msgLookup.ContainsKey(QuickFix.Fields.MsgType.REJECT) && 
-                responder.msgLookup[QuickFix.Fields.MsgType.REJECT].Count>0;
-        }
-
-	    public bool SENT_HEART_BEAT()
-	    {
-            return responder.msgLookup.ContainsKey(QuickFix.Fields.MsgType.HEARTBEAT) &&
-                responder.msgLookup[QuickFix.Fields.MsgType.HEARTBEAT].Count > 0;
-	    }
-
-        public bool SENT_BUSINESS_REJECT()
-        {
-            return responder.msgLookup.ContainsKey(QuickFix.Fields.MsgType.BUSINESS_MESSAGE_REJECT) &&
-                responder.msgLookup[QuickFix.Fields.MsgType.BUSINESS_MESSAGE_REJECT].Count > 0;
-        }
-
-        public bool SENT_BUSINESS_REJECT(int reason)
-        {
-            if (!SENT_BUSINESS_REJECT())
-                return false;
-
-            QuickFix.Message msg = responder.msgLookup[QuickFix.Fields.MsgType.BUSINESS_MESSAGE_REJECT].First();
-
-            if (!msg.IsSetField(QuickFix.Fields.Tags.BusinessRejectReason))
-                return false;
-
-            QuickFix.Fields.BusinessRejectReason reasonField = new QuickFix.Fields.BusinessRejectReason();
-            msg.GetField(reasonField);
-            if (reasonField.getValue() != reason)
-                return false;
-
-            return true;
-        }
-
-        public bool SENT_LOGOUT()
-        {
-            return responder.msgLookup.ContainsKey(QuickFix.Fields.MsgType.LOGOUT) &&
-                responder.msgLookup[QuickFix.Fields.MsgType.LOGOUT].Count > 0;
-        }
-
-        public bool SENT_NOS()
-        {
-            return responder.msgLookup.ContainsKey(QuickFix.Fields.MsgType.NEWORDERSINGLE) &&
-                responder.msgLookup[QuickFix.Fields.MsgType.NEWORDERSINGLE].Count > 0;
-        }
-
-        public bool DISCONNECTED()
-        {
-            return responder.disconnected;
-        }
-
-        public bool SENT_REJECT(int reason, int refTag)
-        {
-            if (!SENT_REJECT())
-                return false;
-
-            QuickFix.Message msg = responder.msgLookup[QuickFix.Fields.MsgType.REJECT].First();
-
-            if (!msg.IsSetField(QuickFix.Fields.Tags.SessionRejectReason))
-                return false;
-
-            QuickFix.Fields.SessionRejectReason reasonField = new QuickFix.Fields.SessionRejectReason();
-            msg.GetField(reasonField);
-            if(reasonField.getValue() != reason)
-                return false;
-
-            if (!msg.IsSetField(QuickFix.Fields.Tags.RefTagID))
-                return false;
-
-            QuickFix.Fields.RefTagID refTagField = new QuickFix.Fields.RefTagID();
-            msg.GetField(refTagField);
-            if (refTagField.getValue() != refTag)
-                return false;
-
-            return true;
-        }
-
-        public void SendNOSMessage()
-        {
-            QuickFix.FIX42.NewOrderSingle order = new QuickFix.FIX42.NewOrderSingle(
-                new QuickFix.Fields.ClOrdID("1"),
-                new QuickFix.Fields.HandlInst(QuickFix.Fields.HandlInst.MANUAL_ORDER),
-                new QuickFix.Fields.Symbol("IBM"),
-                new QuickFix.Fields.Side(QuickFix.Fields.Side.BUY),
-                new QuickFix.Fields.TransactTime(),
-                new QuickFix.Fields.OrdType(QuickFix.Fields.OrdType.LIMIT));
-
-            order.Header.SetField(new QuickFix.Fields.TargetCompID(sessionID.SenderCompID));
-            order.Header.SetField(new QuickFix.Fields.SenderCompID(sessionID.TargetCompID));
-            order.Header.SetField(new QuickFix.Fields.MsgSeqNum(seqNum++));
-
-            session.Next(order.ToString());
-        }
-
-        public void SendResendRequest(int begin, int end)
-        {
-            SendTheMessage(new QuickFix.FIX42.ResendRequest(
-                new QuickFix.Fields.BeginSeqNo(begin),
-                new QuickFix.Fields.EndSeqNo(end)));
-        }
-
-        public void SendResendRequest40(int begin, int end)
-        {
-            SendTheMessage(new QuickFix.FIX40.ResendRequest(
-                new QuickFix.Fields.BeginSeqNo(begin),
-                new QuickFix.Fields.EndSeqNo(end)));
-        }
-
-        private void SendTheMessage(QuickFix.Message msg)
-        {
-            msg.Header.SetField(new QuickFix.Fields.TargetCompID(sessionID.SenderCompID));
-            msg.Header.SetField(new QuickFix.Fields.SenderCompID(sessionID.TargetCompID));
-            msg.Header.SetField(new QuickFix.Fields.MsgSeqNum(seqNum++));
-
-            session.Next(msg.ToString());
-        }
-
-        [Test]
-        public void ConditionalTagMissingReject()
-        {   
-            application.fromAppException = new QuickFix.FieldNotFoundException(61);
-
-            Logon();
             SendNOSMessage();
+        } //seq 4, next is 5
 
-            Assert.That(SENT_BUSINESS_REJECT(QuickFix.Fields.BusinessRejectReason.CONDITIONALLY_REQUIRED_FIELD_MISSING));
-        }
+        SendResendRequest(1, 4);
+        Assert.That(SENT_SEQUENCE_RESET());
+        Assert.That(RESENT(), Is.False);
+    }
 
+    [Test]
+    public void TestGapFillOnResend()
+    {
+        // Engineer a gap fill at the beginning of a re-send range, in the middle, and at the end
+        Logon(); //seq 1
+        QuickFix.FIX42.NewOrderSingle order = new QuickFix.FIX42.NewOrderSingle(
+            new QuickFix.Fields.ClOrdID("1"),
+            new QuickFix.Fields.HandlInst(QuickFix.Fields.HandlInst.MANUAL_ORDER),
+            new QuickFix.Fields.Symbol("IBM"),
+            new QuickFix.Fields.Side(QuickFix.Fields.Side.BUY),
+            new QuickFix.Fields.TransactTime(),
+            new QuickFix.Fields.OrdType(QuickFix.Fields.OrdType.LIMIT));
 
+        order.Header.SetField(new QuickFix.Fields.TargetCompID(_sessionId.TargetCompID));
+        order.Header.SetField(new QuickFix.Fields.SenderCompID(_sessionId.SenderCompID));
 
-        [Test]
-        public void IncorrectTagValueReject()
+        SeqNumType[] gapStarts = new[] { 1UL, 5UL, 11UL }; // 1st gap from seq num 1 to 2 is just the Logon message
+        SeqNumType[] gapEnds = new[] { 2UL, 8UL, 15UL };
+        int orderCount = 0;
+
+        for (SeqNumType msgSeqNum = gapEnds[0]; msgSeqNum < gapStarts[1]; ++msgSeqNum)
         {
-            application.fromAppException = new QuickFix.IncorrectTagValue(54);
-            
-            Logon();
-            SendNOSMessage();
-            Assert.That(SENT_REJECT(QuickFix.Fields.SessionRejectReason.VALUE_IS_INCORRECT,54));
+            order.Header.SetField(new QuickFix.Fields.MsgSeqNum(msgSeqNum));
+            _session!.Send(order);
+            ++orderCount;
+        } //seq 4, next is 5
 
-        }
-
-        [Test]
-        public void UnsupportedMessageReject()
+        for (SeqNumType msgSeqNum = gapStarts[1]; msgSeqNum < gapEnds[1]; ++msgSeqNum)
         {
-            application.fromAppException = new QuickFix.UnsupportedMessageType();
+            _session!.GenerateHeartbeat();
+        } //seq 7, next is 8
 
-            Logon();
-            SendNOSMessage();
-            Assert.That(SENT_BUSINESS_REJECT());
-        }
-
-        [Test]
-        public void LogonReject()
+        for (SeqNumType msgSeqNum = gapEnds[1]; msgSeqNum < gapStarts[2]; ++msgSeqNum)
         {
-            application.fromAdminException  = new QuickFix.RejectLogon("Failed Logon");
-            Logon();
+            order.Header.SetField(new QuickFix.Fields.MsgSeqNum(msgSeqNum));
+            _session!.Send(order);
+            ++orderCount;
+        } //seq 10, next is 11
 
-            Assert.That(SENT_LOGOUT());
-            Assert.That(DISCONNECTED());
-        }
-
-        [Test]
-        public void HeartBeatCheckAfterMessageProcess()
+        for (SeqNumType msgSeqNum = gapStarts[2]; msgSeqNum < gapEnds[2]; ++msgSeqNum)
         {
-            Logon();
-            Thread.Sleep(2000);
+            _session!.GenerateHeartbeat();
+        } // seq 11 - 14
 
-            SendNOSMessage();
-            Assert.That(SENT_HEART_BEAT());
-        }
+        _responder.MsgLookup.Clear();
+        SendResendRequest(1, 100);
 
-        [Test]
-        public void NextResendRequestNoMessagePersist()
+        Assert.That(orderCount, Is.EqualTo(_responder.GetCount(QuickFix.Fields.MsgType.NEWORDERSINGLE)));
+        Assert.That(gapStarts.Length, Is.EqualTo(_responder.GetCount(QuickFix.Fields.MsgType.SEQUENCE_RESET)));
+
+        int count = -1;
+        foreach (QuickFix.Message sequenceResestMsg in _responder.MsgLookup[QuickFix.Fields.MsgType.SEQUENCE_RESET])
         {
-            session.PersistMessages = false;
-
-            Logon(); //seq 1
-
-            for (int i = 0; i < 3; ++i)
-            {
-                SendNOSMessage();
-            } //seq 4, next is 5
-
-            SendResendRequest(1, 4);
-            Assert.That(SENT_RESEND());
-            Assert.IsFalse(RESENT());
+            Assert.That("Y", Is.EqualTo(sequenceResestMsg.GetString(QuickFix.Fields.Tags.GapFillFlag)));
+            Assert.That(gapStarts[++count], Is.EqualTo(sequenceResestMsg.Header.GetULong(QuickFix.Fields.Tags.MsgSeqNum)));
+            Assert.That(gapEnds[count], Is.EqualTo(sequenceResestMsg.GetInt(QuickFix.Fields.Tags.NewSeqNo)));
         }
+    }
 
-        [Test]
-        public void TestGapFillOnResend()
-        {
-            // Engineer a gap fill at the beginning of a re-send range, in the middle, and at the end
-            Logon(); //seq 1
-            QuickFix.FIX42.NewOrderSingle order = new QuickFix.FIX42.NewOrderSingle(
-                new QuickFix.Fields.ClOrdID("1"),
-                new QuickFix.Fields.HandlInst(QuickFix.Fields.HandlInst.MANUAL_ORDER),
-                new QuickFix.Fields.Symbol("IBM"),
-                new QuickFix.Fields.Side(QuickFix.Fields.Side.BUY),
-                new QuickFix.Fields.TransactTime(),
-                new QuickFix.Fields.OrdType(QuickFix.Fields.OrdType.LIMIT));
+    [Test]
+    public void TestResendSessionLevelReject()
+    {
+        Assert.That(_session!.ResendSessionLevelRejects, Is.False); // check for correct default
+        Logon();
 
-            order.Header.SetField(new QuickFix.Fields.TargetCompID(sessionID.TargetCompID));
-            order.Header.SetField(new QuickFix.Fields.SenderCompID(sessionID.SenderCompID));
+        QuickFix.FIX42.Reject reject = new QuickFix.FIX42.Reject(
+            new QuickFix.Fields.RefSeqNum(10));
 
-            int[] gapStarts = new[] { 1, 5, 11 }; // 1st gap  from seq num 1 to 2 is just the Logon message
-            int[] gapEnds = new[] { 2, 8, 15 };
-            int orderCount = 0;
+        reject.Header.SetField(new QuickFix.Fields.TargetCompID(_sessionId.TargetCompID));
+        reject.Header.SetField(new QuickFix.Fields.SenderCompID(_sessionId.SenderCompID));
+        _session.Send(reject);
 
-            for (int msgSeqNum = gapEnds[0]; msgSeqNum < gapStarts[1]; ++msgSeqNum)
-            {
-                order.Header.SetField(new QuickFix.Fields.MsgSeqNum(msgSeqNum));
-                session.Send(order);
-                ++orderCount;
-            } //seq 4, next is 5
+        _responder.MsgLookup.Clear();
+        _session.ResendSessionLevelRejects = true;
+        SendResendRequest(1, 100);
+        Assert.That(_responder.MsgLookup.ContainsKey(QuickFix.Fields.MsgType.REJECT));
 
-            for (int msgSeqNum = gapStarts[1]; msgSeqNum < gapEnds[1]; ++msgSeqNum)
-            {
-                session.GenerateHeartbeat();
-            } //seq 7, next is 8
+        _responder.MsgLookup.Clear();
+        _session.ResendSessionLevelRejects = false;
+        SendResendRequest(1, 100);
+        Assert.That(_responder.MsgLookup.ContainsKey(QuickFix.Fields.MsgType.REJECT), Is.False);
+    }
 
-            for (int msgSeqNum = gapEnds[1]; msgSeqNum < gapStarts[2]; ++msgSeqNum)
-            {
-                order.Header.SetField(new QuickFix.Fields.MsgSeqNum(msgSeqNum));
-                session.Send(order);
-                ++orderCount;
-            } //seq 10, next is 11
+    public void AssertMsInTag(string msgType, int tag, bool shouldHaveMs)
+    {
+        QuickFix.Message msg = _responder.MsgLookup[msgType].Last();
+        string sendingTime = msg.Header.GetString(tag);
+        Match m = _msRegex.Match(sendingTime);
+        Assert.That(m.Success == shouldHaveMs);
+    }
 
-            for (int msgSeqNum = gapStarts[2]; msgSeqNum < gapEnds[2]; ++msgSeqNum)
-            {
-                session.GenerateHeartbeat();
-            } // seq 11 - 14
+    public void AssertMicrosecondsInTag(string msgType, int tag, bool shouldHaveMicrosecond)
+    {
+        QuickFix.Message msg = _responder.MsgLookup[msgType].Last();
+        string sendingTime = msg.Header.GetString(tag);
+        Match m = _microsecondRegex.Match(sendingTime);
+        Assert.That(m.Success == shouldHaveMicrosecond);
+    }
 
-            responder.msgLookup.Clear();
-            SendResendRequest(1, 100);
+    [Test]
+    public void TestMillisecondsInSendingTimeStamp()
+    {
+        // MS in timestamp should default to Y
+        Assert.That(_session!.TimeStampPrecision == TimePrecision.Millisecond );
 
-            Assert.AreEqual(responder.GetCount(QuickFix.Fields.MsgType.NEWORDERSINGLE), orderCount);
-            Assert.AreEqual(responder.GetCount(QuickFix.Fields.MsgType.SEQUENCE_RESET), gapStarts.Length);
+        // Ms should show up
+        Logon();
+        AssertMsInTag(QuickFix.Fields.MsgType.LOGON, QuickFix.Fields.Tags.SendingTime, true);
 
-            int count = -1;
-            foreach (QuickFix.Message sequenceResestMsg in responder.msgLookup[QuickFix.Fields.MsgType.SEQUENCE_RESET])
-            {
-                Assert.AreEqual(sequenceResestMsg.GetField(QuickFix.Fields.Tags.GapFillFlag), "Y");
-                Assert.AreEqual(sequenceResestMsg.Header.GetInt(QuickFix.Fields.Tags.MsgSeqNum), gapStarts[++count]);
-                Assert.AreEqual(sequenceResestMsg.GetInt(QuickFix.Fields.Tags.NewSeqNo), gapEnds[count]);
+        // No ms
+        _session.TimeStampPrecision = TimePrecision.Second;
+        Logon();
+        Assert.That(_responder.MsgLookup[QuickFix.Fields.MsgType.LOGON].Count == 2);
+        AssertMsInTag(QuickFix.Fields.MsgType.LOGON, QuickFix.Fields.Tags.SendingTime, false);
+
+        // Less than FIX42 - no ms in timestamp, even if you tell it to
+        _sessionId = new QuickFix.SessionID(QuickFix.FixValues.BeginString.FIX40, "SENDER", "TARGET");
+        _session.SessionID = _sessionId;
+        _session.TimeStampPrecision = TimePrecision.Millisecond;
+        Logon40();
+        Assert.That(_responder.MsgLookup[QuickFix.Fields.MsgType.LOGON].Count == 3);
+        AssertMsInTag(QuickFix.Fields.MsgType.LOGON, QuickFix.Fields.Tags.SendingTime, false);
+    }
+
+    [Test]
+    public void TestMicrosecondsInSendingTimeStamp()
+    {
+        // Microseconds in timestamp
+        _session!.TimeStampPrecision = TimePrecision.Microsecond;
+
+        // Microseconds should show up
+        Logon();
+        AssertMicrosecondsInTag(QuickFix.Fields.MsgType.LOGON, QuickFix.Fields.Tags.SendingTime, true);
+
+        // Milliseconds in timestamp
+        _session.TimeStampPrecision = TimePrecision.Millisecond;
+        Logon();
+        Assert.That(_responder.MsgLookup[QuickFix.Fields.MsgType.LOGON].Count == 2);
+        AssertMsInTag(QuickFix.Fields.MsgType.LOGON, QuickFix.Fields.Tags.SendingTime, true);
+
+        // Less than FIX42 - no microseconds in timestamp, even if you tell it to
+        _sessionId = new QuickFix.SessionID(QuickFix.FixValues.BeginString.FIX40, "SENDER", "TARGET");
+        _session.SessionID = _sessionId;
+        _session.TimeStampPrecision =  TimePrecision.Microsecond;
+        Logon40();
+        Assert.That(_responder.MsgLookup[QuickFix.Fields.MsgType.LOGON].Count == 3);
+        AssertMicrosecondsInTag(QuickFix.Fields.MsgType.LOGON, QuickFix.Fields.Tags.SendingTime, false);
+    }
+
+    [Test]
+    public void TestMillisecondsInOrigSendingTimeStamp()
+    {
+        // MS in timestamp should default
+        Assert.That(_session!.TimeStampPrecision == TimePrecision.Millisecond);
+
+        // Logon first
+        Logon();
+
+        // Do a resend request
+        SendResendRequest(0, 2);
+        AssertMsInTag(QuickFix.Fields.MsgType.SEQUENCERESET, QuickFix.Fields.Tags.OrigSendingTime, true);
+
+        // NO MS
+        _session.TimeStampPrecision = TimePrecision.Second;
+        SendResendRequest(0, 2);
+        AssertMsInTag(QuickFix.Fields.MsgType.SEQUENCERESET, QuickFix.Fields.Tags.OrigSendingTime, false);
+
+        // Less than FIX42 - no ms in timestamp, even if you tell it to
+        _sessionId = new QuickFix.SessionID(QuickFix.FixValues.BeginString.FIX40, "SENDER", "TARGET");
+        _session.SessionID = _sessionId;
+        _session.TimeStampPrecision = TimePrecision.Millisecond;
+        SendResendRequest40(0, 2);
+        AssertMsInTag(QuickFix.Fields.MsgType.SEQUENCERESET, QuickFix.Fields.Tags.OrigSendingTime, false);
+    }
+
+    [Test]
+    public void TestMicrosecondsInOrigSendingTimeStamp()
+    {
+        // Microsecond in timestamp
+        _session!.TimeStampPrecision = TimePrecision.Microsecond;
+
+        // Logon first
+        Logon();
+
+        // Do a resend request
+        SendResendRequest(0, 2);
+        AssertMicrosecondsInTag(QuickFix.Fields.MsgType.SEQUENCERESET, QuickFix.Fields.Tags.OrigSendingTime, true);
+
+        // NO MS
+        _session.TimeStampPrecision = TimePrecision.Second;
+        SendResendRequest(0, 2);
+        AssertMicrosecondsInTag(QuickFix.Fields.MsgType.SEQUENCERESET, QuickFix.Fields.Tags.OrigSendingTime, false);
+
+        // Less than FIX42 - no ms in timestamp, even if you tell it to
+        _sessionId = new QuickFix.SessionID(QuickFix.FixValues.BeginString.FIX40, "SENDER", "TARGET");
+        _session.SessionID = _sessionId;
+        _session.TimeStampPrecision = TimePrecision.Microsecond;
+        SendResendRequest40(0, 2);
+        AssertMicrosecondsInTag(QuickFix.Fields.MsgType.SEQUENCERESET, QuickFix.Fields.Tags.OrigSendingTime, false);
+    }
+
+    [Test]
+    public void TestLastMsgSeqNumProcessed()
+    {
+        // Disabled by default
+        Assert.That(_session!.EnableLastMsgSeqNumProcessed, Is.False);
+
+        _session.EnableLastMsgSeqNumProcessed = true;
+
+        // Logon
+        Logon();
+        QuickFix.Message msg = _responder.MsgLookup[QuickFix.Fields.MsgType.LOGON].Last();
+        SeqNumType lastSeqNumProcessed = msg.Header.GetULong(QuickFix.Fields.Tags.LastMsgSeqNumProcessed);
+        Assert.That(lastSeqNumProcessed == 1);
+
+        // NOS
+        QuickFix.FIX42.NewOrderSingle order = new QuickFix.FIX42.NewOrderSingle(
+            new QuickFix.Fields.ClOrdID("1"),
+            new QuickFix.Fields.HandlInst(QuickFix.Fields.HandlInst.MANUAL_ORDER),
+            new QuickFix.Fields.Symbol("IBM"),
+            new QuickFix.Fields.Side(QuickFix.Fields.Side.BUY),
+            new QuickFix.Fields.TransactTime(),
+            new QuickFix.Fields.OrdType(QuickFix.Fields.OrdType.LIMIT));
+
+        order.Header.SetField(new QuickFix.Fields.TargetCompID(_sessionId.SenderCompID));
+        order.Header.SetField(new QuickFix.Fields.SenderCompID(_sessionId.TargetCompID));
+        order.Header.SetField(new QuickFix.Fields.MsgSeqNum(_seqNum++));
+        _session.Send(order);
+
+        msg = _responder.MsgLookup[QuickFix.Fields.MsgType.NEW_ORDER_D].Last();
+        lastSeqNumProcessed = msg.Header.GetULong(QuickFix.Fields.Tags.LastMsgSeqNumProcessed);
+        Assert.That(lastSeqNumProcessed == 1);
+    }
+
+    [Test]
+    public void TestLastMsgSeqNumProcessedAfterTooHighLogon()
+    {
+        // issue #942
+        _session!.EnableLastMsgSeqNumProcessed = true;
+        _session.NextTargetMsgSeqNum = 666;
+
+        // Logon initiated by session
+        _session.GenerateLogon();
+
+        // Logon response with seqnum too high
+        var logonMsg = new QuickFix.FIX42.Logon();
+        SendLogon(logonMsg, 800);
+
+        // Session responds with a ResendRequest
+        Assert.That(_responder.MsgLookup[QuickFix.Fields.MsgType.RESEND_REQUEST].Count, Is.EqualTo(1));
+        QuickFix.Message rr = _responder.MsgLookup[QuickFix.Fields.MsgType.RESEND_REQUEST].Dequeue();
+        Assert.That(rr.Header.GetULong(QuickFix.Fields.Tags.LastMsgSeqNumProcessed), Is.EqualTo(800));
+    }
+
+    [Test]
+    public void TestMaxMessagesInResendRequest()
+    {
+        // Default
+        Assert.That(_session!.MaxMessagesInResendRequest, Is.EqualTo(0));
+
+        _session.MaxMessagesInResendRequest = 2500;
+        // Logon
+        Logon();
+
+        // NOS
+        QuickFix.FIX42.NewOrderSingle order = new QuickFix.FIX42.NewOrderSingle(
+            new QuickFix.Fields.ClOrdID("1"),
+            new QuickFix.Fields.HandlInst(QuickFix.Fields.HandlInst.MANUAL_ORDER),
+            new QuickFix.Fields.Symbol("IBM"),
+            new QuickFix.Fields.Side(QuickFix.Fields.Side.BUY),
+            new QuickFix.Fields.TransactTime(),
+            new QuickFix.Fields.OrdType(QuickFix.Fields.OrdType.LIMIT));
+
+        order.Header.SetField(new QuickFix.Fields.TargetCompID(_sessionId.SenderCompID));
+        order.Header.SetField(new QuickFix.Fields.SenderCompID(_sessionId.TargetCompID));
+        order.Header.SetField(new QuickFix.Fields.MsgSeqNum(5005));
+        // This will generate resend requests
+        _session.Verify(order, true, false);
+
+        // 3 resend requests
+        //  2->2501
+        //  2502->5001
+        //  5002->5005
+
+        Assert.That(_responder.MsgLookup[QuickFix.Fields.MsgType.RESENDREQUEST].Count == 1);
+        QuickFix.Message msg = _responder.MsgLookup[QuickFix.Fields.MsgType.RESENDREQUEST].Dequeue();
+        Assert.That(msg.GetInt(QuickFix.Fields.Tags.BeginSeqNo), Is.EqualTo(2));
+        Assert.That(msg.GetInt(QuickFix.Fields.Tags.EndSeqNo), Is.EqualTo(2501));
+
+        // Jump forward to the end of the resend chunk with a fillgap reset message
+        QuickFix.FIX42.SequenceReset reset = new QuickFix.FIX42.SequenceReset();
+        reset.Header.SetField(new QuickFix.Fields.TargetCompID(_sessionId.SenderCompID));
+        reset.Header.SetField(new QuickFix.Fields.SenderCompID(_sessionId.TargetCompID));
+        reset.SetField(new QuickFix.Fields.GapFillFlag(true));
+
+        reset.Header.SetField(new QuickFix.Fields.MsgSeqNum(2));
+        reset.SetField(new QuickFix.Fields.NewSeqNo(2501));
+        _session.Next(reset.ConstructString());
+
+        order.Header.SetField(new QuickFix.Fields.MsgSeqNum(2501));
+        _session.Next(order.ConstructString());
+
+        // Should have triggered next resend (2502->5001), check this
+        //Console.WriteLine(responder.msgLookup[QuickFix.Fields.MsgType.RESENDREQUEST].Count);
+        Assert.That(_responder.MsgLookup[QuickFix.Fields.MsgType.RESENDREQUEST].Count == 1);
+        msg = _responder.MsgLookup[QuickFix.Fields.MsgType.RESENDREQUEST].Dequeue();
+        Assert.That(msg.GetInt(QuickFix.Fields.Tags.BeginSeqNo), Is.EqualTo(2502));
+        Assert.That(msg.GetInt(QuickFix.Fields.Tags.EndSeqNo), Is.EqualTo(5001));
+
+        // Jump forward to the end of the resend chunk with a fillgap reset message
+        reset.Header.SetField(new QuickFix.Fields.MsgSeqNum(2502));
+        reset.SetField(new QuickFix.Fields.NewSeqNo(5001));
+        _session.Next(reset.ConstructString());
+
+        order.Header.SetField(new QuickFix.Fields.MsgSeqNum(5001));
+        _session.Next(order.ConstructString());   // Triggers next resend (5002->5005)
+
+        //Console.WriteLine(responder.msgLookup[QuickFix.Fields.MsgType.RESENDREQUEST].Count);
+        Assert.That(_responder.MsgLookup[QuickFix.Fields.MsgType.RESENDREQUEST].Count == 1);
+        msg = _responder.MsgLookup[QuickFix.Fields.MsgType.RESENDREQUEST].Dequeue();
+        Assert.That(msg.GetInt(QuickFix.Fields.Tags.BeginSeqNo), Is.EqualTo(5002));
+        Assert.That(msg.GetInt(QuickFix.Fields.Tags.EndSeqNo), Is.EqualTo(5004));
+    }
+
+    [Test]
+    public void TestIgnorePossDupInResendRequest()
+    {
+        // Default is false
+        Assert.That(_session!.IgnorePossDupResendRequests, Is.EqualTo(false));
+
+        _session.IgnorePossDupResendRequests = true;
+        // Logon
+        Logon();
+
+        // NOS
+        QuickFix.FIX42.NewOrderSingle order = new QuickFix.FIX42.NewOrderSingle(
+            new QuickFix.Fields.ClOrdID("1"),
+            new QuickFix.Fields.HandlInst(QuickFix.Fields.HandlInst.MANUAL_ORDER),
+            new QuickFix.Fields.Symbol("IBM"),
+            new QuickFix.Fields.Side(QuickFix.Fields.Side.BUY),
+            new QuickFix.Fields.TransactTime(),
+            new QuickFix.Fields.OrdType(QuickFix.Fields.OrdType.LIMIT));
+
+        order.Header.SetField(new QuickFix.Fields.TargetCompID(_sessionId.SenderCompID));
+        order.Header.SetField(new QuickFix.Fields.SenderCompID(_sessionId.TargetCompID));
+        order.Header.SetField(new QuickFix.Fields.MsgSeqNum(_seqNum++));
+        // This will generate resend requests
+        _session.Send(order);
+
+        Assert.That(_responder.MsgLookup[QuickFix.Fields.MsgType.NEWORDERSINGLE].Count == 1);
+
+        QuickFix.Message msg = new QuickFix.FIX42.ResendRequest(
+            new QuickFix.Fields.BeginSeqNo(1),
+            new QuickFix.Fields.EndSeqNo(0));
+        msg.Header.SetField(new QuickFix.Fields.PossDupFlag(true));
+        SendTheMessage(msg);
+
+        Assert.That(_responder.MsgLookup[QuickFix.Fields.MsgType.NEWORDERSINGLE].Count == 1);
+    }
+
+    [Test]
+    public void TestDoesSessionExist()
+    {
+        QuickFix.SessionID invalidSessionId = new QuickFix.SessionID("FIX.4.2", "NOT_SENDER", "NOT_TARGET");
+        QuickFix.SessionID validSessionId = new QuickFix.SessionID("FIX.4.2", "SENDER", "TARGET");
+
+        Assert.That(QuickFix.Session.DoesSessionExist(invalidSessionId), Is.EqualTo(false));
+        Assert.That(QuickFix.Session.DoesSessionExist(validSessionId), Is.EqualTo(true));
+    }
+
+    [Test]
+    public void TestSettingNextTargetMsgSeqNum()
+    {
+        _session!.NextTargetMsgSeqNum = 100;
+        Assert.That(_session.NextTargetMsgSeqNum, Is.EqualTo(100));
+    }
+
+    [Test]
+    public void TestSettingNextSenderMsgSeqNum()
+    {
+        _session!.NextSenderMsgSeqNum = 200;
+        Assert.That(_session.NextSenderMsgSeqNum, Is.EqualTo(200));
+    }
+
+    [Test]
+    public void TestGettingIsInitiator()
+    {
+        Assert.That(_session2!.IsInitiator, Is.EqualTo(true));
+    }
+
+    [Test]
+    public void TestGettingIsAcceptor()
+    {
+        Assert.That(_session2!.IsAcceptor, Is.EqualTo(false));
+    }
+
+    [Test]
+    public void TestMessageStoreAccessor()
+    {
+        List<string> messages = new List<string>();
+
+        messages.Clear();
+        _session!.MessageStore.Get(0, 100, messages);
+        Assert.That(messages.Count, Is.EqualTo(0));
+
+        Logon();
+
+        messages.Clear();
+        _session.MessageStore.Get(0, 100, messages);
+        Assert.That(messages.Count, Is.EqualTo(1)); // logon response
+    }
+
+    [Test]
+    public void TestRequiresOrigSendingTime_Y()
+    {
+        // Under default configuration, session should reject a ResendRequest that lacks OrigSendingTime unset
+
+        // Check default is as expected
+        Assert.That(_session!.RequiresOrigSendingTime, Is.EqualTo(true));
+
+        Logon();
+
+        QuickFix.FIX42.SequenceReset sr = new(new QuickFix.Fields.NewSeqNo(5));
+        sr.GapFillFlag = new QuickFix.Fields.GapFillFlag(true);
+        sr.Header.SetField(new QuickFix.Fields.PossDupFlag(true));
+
+        sr.Header.SetField(new QuickFix.Fields.MsgSeqNum(_seqNum--)); // so it triggers DoTargetTooLow code
+
+        SendTheMessage(sr);
+
+        Assert.That(_responder.MsgLookup[QuickFix.Fields.MsgType.REJECT].Count == 1);
+        QuickFix.FIX42.Reject rej =
+            (_responder.MsgLookup[QuickFix.Fields.MsgType.REJECT].Peek() as QuickFix.FIX42.Reject)!;
+        Assert.That(rej.SessionRejectReason.Value, Is.EqualTo(QuickFix.Fields.SessionRejectReason.REQUIRED_TAG_MISSING));
+    }
+
+    [Test]
+    public void TestRequiresOrigSendingTime_N()
+    {
+        // Under OrigSendingTime=N, session will allow ResendRequest that lacks OrigSendingTime
+        _session!.RequiresOrigSendingTime = false;
+
+        Logon();
+
+        QuickFix.FIX42.SequenceReset sr = new(new QuickFix.Fields.NewSeqNo(5));
+        sr.GapFillFlag = new QuickFix.Fields.GapFillFlag(true);
+        sr.Header.SetField(new QuickFix.Fields.PossDupFlag(true));
+
+        sr.Header.SetField(new QuickFix.Fields.MsgSeqNum(_seqNum--)); // so it triggers DoTargetTooLow code
+
+        SendTheMessage(sr);
+
+        Assert.That(_responder.MsgLookup.ContainsKey(QuickFix.Fields.MsgType.REJECT), Is.False);
+    }
+
+    [Test]
+    public void TestToAppDoNotSend()
+    {
+        Logon();
+        QuickFix.FIX42.NewOrderSingle order = new(
+             new QuickFix.Fields.ClOrdID("1"),
+             new QuickFix.Fields.HandlInst(QuickFix.Fields.HandlInst.MANUAL_ORDER),
+             new QuickFix.Fields.Symbol("IBM"),
+             new QuickFix.Fields.Side(QuickFix.Fields.Side.BUY),
+             new QuickFix.Fields.TransactTime(),
+             new QuickFix.Fields.OrdType(QuickFix.Fields.OrdType.LIMIT));
+
+        _application.ToAppException = new QuickFix.DoNotSend();
+        _session!.Send(order);
+        Assert.That(SENT_NOS(), Is.False);
+    }
+
+    [Test]
+    public void TestToAppResendDoNotSend()
+    {
+        Logon();
+        QuickFix.FIX42.NewOrderSingle order = new QuickFix.FIX42.NewOrderSingle(
+             new QuickFix.Fields.ClOrdID("1"),
+             new QuickFix.Fields.HandlInst(QuickFix.Fields.HandlInst.MANUAL_ORDER),
+             new QuickFix.Fields.Symbol("IBM"),
+             new QuickFix.Fields.Side(QuickFix.Fields.Side.BUY),
+             new QuickFix.Fields.TransactTime(),
+             new QuickFix.Fields.OrdType(QuickFix.Fields.OrdType.LIMIT));
+
+        _session!.Send(order);
+        Assert.That(SENT_NOS(), Is.True);
+
+        _responder.MsgLookup.Remove(QuickFix.Fields.MsgType.NEWORDERSINGLE);
+        _application.ToAppException = new QuickFix.DoNotSend();
+
+        SendResendRequest(1, 0);
+        Assert.That(SENT_NOS(), Is.False);
+    }
+
+    [Test]
+    public void TestToAdminDoNotSend()
+    {
+        Logon();
+        QuickFix.FIX42.Reject reject = new();
+
+        _application.ToAdminException = new QuickFix.DoNotSend();
+        _session!.Send(reject);
+        Assert.That(SENT_REJECT(), Is.False);
+    }
+
+    [Test]
+    public void TestApplicationExtension()
+    {
+        var mockApp = new SessionTestSupport.MockApplicationExt();
+        _session = new QuickFix.Session(true, mockApp, new MemoryStoreFactory(), _sessionId,
+            new QuickFix.DataDictionaryProvider(), new QuickFix.SessionSchedule(_config), 0,
+            NullQuickFixLoggerFactory.Instance, new QuickFix.DefaultMessageFactory(), "blah");
+        _session.SetResponder(_responder);
+        _session.CheckLatency = false;
+
+        Logon();
+        QuickFix.FIX42.NewOrderSingle order = new QuickFix.FIX42.NewOrderSingle(
+            new QuickFix.Fields.ClOrdID("1"),
+            new QuickFix.Fields.HandlInst(QuickFix.Fields.HandlInst.MANUAL_ORDER),
+            new QuickFix.Fields.Symbol("IBM"),
+            new QuickFix.Fields.Side(QuickFix.Fields.Side.BUY),
+            new QuickFix.Fields.TransactTime(),
+            new QuickFix.Fields.OrdType(QuickFix.Fields.OrdType.LIMIT));
+
+        order.Header.SetField(new QuickFix.Fields.TargetCompID(_sessionId.SenderCompID));
+        order.Header.SetField(new QuickFix.Fields.SenderCompID(_sessionId.TargetCompID));
+        order.Header.SetField(new QuickFix.Fields.MsgSeqNum(2));
+
+        _session.Next(order.ConstructString());
+
+        Assert.That(mockApp.InterceptedMessageTypes.Count, Is.EqualTo(2));
+        Assert.That(mockApp.InterceptedMessageTypes.Contains(QuickFix.Fields.MsgType.LOGON), Is.True);
+        Assert.That(mockApp.InterceptedMessageTypes.Contains(QuickFix.Fields.MsgType.NEWORDERSINGLE), Is.True);
+    }
+
+    [Test]
+    public void TestRequireLogon()
+    {
+        QuickFix.FIX42.NewOrderSingle order = new QuickFix.FIX42.NewOrderSingle(
+            new QuickFix.Fields.ClOrdID("1"),
+            new QuickFix.Fields.HandlInst(QuickFix.Fields.HandlInst.MANUAL_ORDER),
+            new QuickFix.Fields.Symbol("IBM"),
+            new QuickFix.Fields.Side(QuickFix.Fields.Side.BUY),
+            new QuickFix.Fields.TransactTime(),
+            new QuickFix.Fields.OrdType(QuickFix.Fields.OrdType.LIMIT));
+        // This should cause disconnect, because first message is something other than a logon.
+        SendTheMessage(order);
+        Assert.That(DISCONNECTED());
+    }
+
+    [Test]
+    public void TestResendRequestMsgSeqNumNotIgnoredWhenNoPersistance()
+    {
+        _session!.PersistMessages = false;
+
+        Logon();
+
+        SendNOSMessage();
+        SendNOSMessage();
+
+        //The below will trigger a sequence reset
+        SendResendRequest(2, 0);
+
+        SendNOSMessage();
+        Assert.That(!SENT_RESEND_REQUEST());
+    }
+
+    [Test]
+    public void TestGenerateResendRequest() {
+        _session!.NextTargetMsgSeqNum = 100;
+
+        // <= FIX41
+        _session.GenerateResendRequest(QuickFix.FixValues.BeginString.FIX41, 125);
+        Assert.That(_responder.GetCount(MsgType.RESEND_REQUEST), Is.EqualTo(1));
+        var rr = _responder.MsgLookup[MsgType.RESEND_REQUEST].Dequeue();
+        Assert.That(rr.GetInt(Tags.BeginSeqNo), Is.EqualTo(100));
+        Assert.That(rr.GetInt(Tags.EndSeqNo), Is.EqualTo(999999));
+
+        // >= FIX42
+        _session.GenerateResendRequest(QuickFix.FixValues.BeginString.FIX42, 125);
+        Assert.That(_responder.GetCount(MsgType.RESEND_REQUEST), Is.EqualTo(1));
+        rr = _responder.MsgLookup[MsgType.RESEND_REQUEST].Dequeue();
+        Assert.That(rr.GetInt(Tags.BeginSeqNo), Is.EqualTo(100));
+        Assert.That(rr.GetInt(Tags.EndSeqNo), Is.EqualTo(0));
+
+        // Max resend is set: request is greater than max resend
+        _session.MaxMessagesInResendRequest = 100;
+        _session.GenerateResendRequest(QuickFix.FixValues.BeginString.FIX42, 225);
+        Assert.That(_responder.GetCount(MsgType.RESEND_REQUEST), Is.EqualTo(1));
+        rr = _responder.MsgLookup[MsgType.RESEND_REQUEST].Dequeue();
+        Assert.That(rr.GetInt(Tags.BeginSeqNo), Is.EqualTo(100));
+        Assert.That(rr.GetInt(Tags.EndSeqNo), Is.EqualTo(199));
+
+        // Max resend is set: request is lesser than max resend
+        _session.GenerateResendRequest(QuickFix.FixValues.BeginString.FIX42, 175);
+        Assert.That(_responder.GetCount(MsgType.RESEND_REQUEST), Is.EqualTo(1));
+        rr = _responder.MsgLookup[MsgType.RESEND_REQUEST].Dequeue();
+        Assert.That(rr.GetInt(Tags.BeginSeqNo), Is.EqualTo(100));
+        Assert.That(rr.GetInt(Tags.EndSeqNo), Is.EqualTo(174));
+    }
+
+    [Test]
+    public void TestBasicResendRequest_NoMax() {
+        // just a regular boring resend request scenario, when MaxMessagesInResendRequest is unset
+
+        // Setup: Establish connection.  Server sends Seq too high, causing client to ResendRequest.
+        Logon();
+        SendNOSMessage();
+        Assert.That(_session!.NextTargetMsgSeqNum, Is.EqualTo(3));
+
+        SendNOSMessage(6);
+        Assert.That(_responder.GetCount(MsgType.RESEND_REQUEST), Is.EqualTo(1));
+
+        var resendRequest = (QuickFix.FIX42.ResendRequest)_responder.MsgLookup[MsgType.RESEND_REQUEST].Dequeue();
+        Assert.That(resendRequest.BeginSeqNo.Value, Is.EqualTo(3));
+        Assert.That(resendRequest.EndSeqNo.Value, Is.EqualTo(0)); // 0 is infinity, but actually we just want until 5
+        Assert.That(_session.IsResendRequested, Is.True);
+
+        // Server sends 3 resent messages and 2 new messages
+        // (client already got seq=6)
+        foreach (SeqNumType i in new[] { 3, 4, 5, 7, 8 }) {
+            var msg = CreateNOSMessage(i);
+            if (i < 7) {
+                msg.Header.SetField(new PossDupFlag(true));
+                msg.Header.SetField(new OrigSendingTime(DateTime.MinValue)); // (value doesn't matter for test)
             }
+            _session.Next(msg.ConstructString());
+
+            if (i < 5)
+                Assert.That(_session.IsResendRequested, Is.True, $"seq num {i}");
+            else
+                Assert.That(_session.IsResendRequested, Is.False, $"seq num {i}");
         }
+    }
 
-        [Test]
-        public void TestResendSessionLevelReject()
-        {
-            Assert.False(session.ResendSessionLevelRejects); // check for correct default
-            Logon(); 
+    [Test]
+    public void TestBasicResendRequest_WithMax() {
+        // just a regular boring resend request scenario, when MaxMessagesInResendRequest is configured
+        // aka "chunked"
 
-            QuickFix.FIX42.Reject reject = new QuickFix.FIX42.Reject(
-                new QuickFix.Fields.RefSeqNum(10));
+        // Setup: Establish connection.  Server sends Seq too high, causing client to ResendRequest.
+        _session!.MaxMessagesInResendRequest = 100;
+        Logon();
+        SendNOSMessage();
+        Assert.That(_session!.NextTargetMsgSeqNum, Is.EqualTo(3));
 
-            reject.Header.SetField(new QuickFix.Fields.TargetCompID(sessionID.TargetCompID));
-            reject.Header.SetField(new QuickFix.Fields.SenderCompID(sessionID.SenderCompID));
-            session.Send(reject);
+        SendNOSMessage(6);
+        Assert.That(_responder.GetCount(MsgType.RESEND_REQUEST), Is.EqualTo(1));
 
-            responder.msgLookup.Clear();
-            session.ResendSessionLevelRejects = true;
-            SendResendRequest(1, 100);
-            Assert.That(responder.msgLookup.ContainsKey(QuickFix.Fields.MsgType.REJECT));
+        var resendRequest =
+            (QuickFix.FIX42.ResendRequest)_responder.MsgLookup[MsgType.RESEND_REQUEST].Dequeue();
+        Assert.That(resendRequest.BeginSeqNo.Value, Is.EqualTo(3));
+        Assert.That(resendRequest.EndSeqNo.Value, Is.EqualTo(5));
 
-            responder.msgLookup.Clear();
-            session.ResendSessionLevelRejects = false;
-            SendResendRequest(1, 100);
-            Assert.False(responder.msgLookup.ContainsKey(QuickFix.Fields.MsgType.REJECT));
+        Assert.That(_session.IsResendRequested, Is.True);
+
+        // Server sends 3 resent messages and 2 new messages
+        // (client already got seq=6)
+        foreach (SeqNumType i in new[] { 3, 4, 5, 7, 8 }) {
+            var msg = CreateNOSMessage(i);
+            if (i < 7) {
+                msg.Header.SetField(new PossDupFlag(true));
+                msg.Header.SetField(new OrigSendingTime(DateTime.MinValue)); // (value doesn't matter for test)
+                _session.Next(msg.ConstructString());
+            }
+            _session.Next(msg.ConstructString());
+
+            if (i < 5)
+                Assert.That(_session.IsResendRequested, Is.True, $"seq num {i}");
+            else
+                Assert.That(_session.IsResendRequested, Is.False, $"seq num {i}");
         }
-
-        public void AssertMsInTag(string msgType, int tag, bool shouldHaveMs)
-        {
-            QuickFix.Message msg = responder.msgLookup[msgType].Last();
-            string sendingTime = msg.Header.GetField(tag);
-            Match m = msRegex.Match(sendingTime);
-            Assert.That(m.Success == shouldHaveMs);
-        }
-
-        [Test]
-        public void TestMillisecondsInSendingTimeStamp()
-        {
-            // MS in timestamp should default to Y
-            Assert.That(session.MillisecondsInTimeStamp);
-
-            // Ms should show up
-            Logon();
-            AssertMsInTag(QuickFix.Fields.MsgType.LOGON, QuickFix.Fields.Tags.SendingTime, true);
-            
-            // No ms
-            session.MillisecondsInTimeStamp = false;
-            Logon();
-            Assert.That(responder.msgLookup[QuickFix.Fields.MsgType.LOGON].Count == 2);
-            AssertMsInTag(QuickFix.Fields.MsgType.LOGON, QuickFix.Fields.Tags.SendingTime, false);
-
-            // Less than FIX42 - no ms in timestamp, even if you tell it to
-            sessionID = new QuickFix.SessionID(QuickFix.FixValues.BeginString.FIX40, "SENDER", "TARGET");
-            session.SessionID = sessionID;
-            session.MillisecondsInTimeStamp = true;
-            Logon40();
-            Assert.That(responder.msgLookup[QuickFix.Fields.MsgType.LOGON].Count == 3);
-            AssertMsInTag(QuickFix.Fields.MsgType.LOGON, QuickFix.Fields.Tags.SendingTime, false);
-        }
-
-        [Test]
-        public void TestMillisecondsInOrigSendingTimeStamp()
-        {
-            // MS in timestamp should default to Y
-            Assert.That(session.MillisecondsInTimeStamp);
-            
-            // Logon first
-            Logon();
-            
-            // Do a resend request
-            SendResendRequest(0, 2);
-            AssertMsInTag(QuickFix.Fields.MsgType.SEQUENCERESET, QuickFix.Fields.Tags.OrigSendingTime, true);
-            
-            // NO MS
-            session.MillisecondsInTimeStamp = false;
-            SendResendRequest(0, 2);
-            AssertMsInTag(QuickFix.Fields.MsgType.SEQUENCERESET, QuickFix.Fields.Tags.OrigSendingTime, false);
-
-            // Less than FIX42 - no ms in timestamp, even if you tell it to
-            sessionID = new QuickFix.SessionID(QuickFix.FixValues.BeginString.FIX40, "SENDER", "TARGET");
-            session.SessionID = sessionID;
-            session.MillisecondsInTimeStamp = true;
-            SendResendRequest40(0, 2);
-            AssertMsInTag(QuickFix.Fields.MsgType.SEQUENCERESET, QuickFix.Fields.Tags.OrigSendingTime, false);
-        }
-
-        [Test]
-        public void TestLastMsgSeqNumProcessed()
-        {
-            // Disabled by default
-            Assert.That(!session.EnableLastMsgSeqNumProcessed);
-
-            session.EnableLastMsgSeqNumProcessed = true;
-
-            // Logon 
-            Logon();
-            QuickFix.Message msg = responder.msgLookup[QuickFix.Fields.MsgType.LOGON].Last();
-            int lastSeqNumProcessed = msg.Header.GetInt(QuickFix.Fields.Tags.LastMsgSeqNumProcessed);
-            Assert.That(lastSeqNumProcessed == 1);
-
-            // NOS
-            QuickFix.FIX42.NewOrderSingle order = new QuickFix.FIX42.NewOrderSingle(
-                new QuickFix.Fields.ClOrdID("1"),
-                new QuickFix.Fields.HandlInst(QuickFix.Fields.HandlInst.MANUAL_ORDER),
-                new QuickFix.Fields.Symbol("IBM"),
-                new QuickFix.Fields.Side(QuickFix.Fields.Side.BUY),
-                new QuickFix.Fields.TransactTime(),
-                new QuickFix.Fields.OrdType(QuickFix.Fields.OrdType.LIMIT));
-
-            order.Header.SetField(new QuickFix.Fields.TargetCompID(sessionID.SenderCompID));
-            order.Header.SetField(new QuickFix.Fields.SenderCompID(sessionID.TargetCompID));
-            order.Header.SetField(new QuickFix.Fields.MsgSeqNum(seqNum++));
-            session.Send(order);
-
-            msg = responder.msgLookup[QuickFix.Fields.MsgType.NEW_ORDER_D].Last();
-            lastSeqNumProcessed = msg.Header.GetInt(QuickFix.Fields.Tags.LastMsgSeqNumProcessed);
-            Assert.That(lastSeqNumProcessed == 1);
-        }
-
-        [Test]
-        public void TestMaxMessagesInResendRequest()
-        {
-            // Default
-            Assert.That(session.MaxMessagesInResendRequest, Is.EqualTo(0));
-
-            session.MaxMessagesInResendRequest = 2500;
-            // Logon 
-            Logon();
-
-            // NOS
-            QuickFix.FIX42.NewOrderSingle order = new QuickFix.FIX42.NewOrderSingle(
-                new QuickFix.Fields.ClOrdID("1"),
-                new QuickFix.Fields.HandlInst(QuickFix.Fields.HandlInst.MANUAL_ORDER),
-                new QuickFix.Fields.Symbol("IBM"),
-                new QuickFix.Fields.Side(QuickFix.Fields.Side.BUY),
-                new QuickFix.Fields.TransactTime(),
-                new QuickFix.Fields.OrdType(QuickFix.Fields.OrdType.LIMIT));
-
-            order.Header.SetField(new QuickFix.Fields.TargetCompID(sessionID.SenderCompID));
-            order.Header.SetField(new QuickFix.Fields.SenderCompID(sessionID.TargetCompID));
-            order.Header.SetField(new QuickFix.Fields.MsgSeqNum(5005));
-            // This will generate resend requests
-            session.Verify(order, true, false);
-
-            // 3 resend requests
-            //  2->2501
-            //  2502->5001
-            //  5002->5005
-
-            Assert.That(responder.msgLookup[QuickFix.Fields.MsgType.RESENDREQUEST].Count == 1);
-            QuickFix.Message msg = responder.msgLookup[QuickFix.Fields.MsgType.RESENDREQUEST].Dequeue();
-            Assert.That(msg.GetInt(QuickFix.Fields.Tags.BeginSeqNo), Is.EqualTo(2));
-            Assert.That(msg.GetInt(QuickFix.Fields.Tags.EndSeqNo), Is.EqualTo(2501));
-
-            // Jump forward to the end of the resend chunk with a fillgap reset message
-            QuickFix.FIX42.SequenceReset reset = new QuickFix.FIX42.SequenceReset();
-            reset.Header.SetField(new QuickFix.Fields.TargetCompID(sessionID.SenderCompID));
-            reset.Header.SetField(new QuickFix.Fields.SenderCompID(sessionID.TargetCompID));
-            reset.SetField(new QuickFix.Fields.GapFillFlag(true));
-
-            reset.Header.SetField(new QuickFix.Fields.MsgSeqNum(2));
-            reset.SetField(new QuickFix.Fields.NewSeqNo(2501));
-            session.Next(reset.ToString());
-
-            order.Header.SetField(new QuickFix.Fields.MsgSeqNum(2501));
-            session.Next(order.ToString());
-
-            // Should have triggered next resend (2502->5001), check this
-            Console.WriteLine(responder.msgLookup[QuickFix.Fields.MsgType.RESENDREQUEST].Count);
-            Assert.That(responder.msgLookup[QuickFix.Fields.MsgType.RESENDREQUEST].Count == 1);
-            msg = responder.msgLookup[QuickFix.Fields.MsgType.RESENDREQUEST].Dequeue();
-            Assert.That(msg.GetInt(QuickFix.Fields.Tags.BeginSeqNo), Is.EqualTo(2502));
-            Assert.That(msg.GetInt(QuickFix.Fields.Tags.EndSeqNo), Is.EqualTo(5001));
-
-            // Jump forward to the end of the resend chunk with a fillgap reset message
-            reset.Header.SetField(new QuickFix.Fields.MsgSeqNum(2502));
-            reset.SetField(new QuickFix.Fields.NewSeqNo(5001));
-            session.Next(reset.ToString());
-
-            order.Header.SetField(new QuickFix.Fields.MsgSeqNum(5001));
-            session.Next(order.ToString());   // Triggers next resend (5002->5005)
-
-            Console.WriteLine(responder.msgLookup[QuickFix.Fields.MsgType.RESENDREQUEST].Count);
-            Assert.That(responder.msgLookup[QuickFix.Fields.MsgType.RESENDREQUEST].Count == 1);
-            msg = responder.msgLookup[QuickFix.Fields.MsgType.RESENDREQUEST].Dequeue();
-            Assert.That(msg.GetInt(QuickFix.Fields.Tags.BeginSeqNo), Is.EqualTo(5002));
-            Assert.That(msg.GetInt(QuickFix.Fields.Tags.EndSeqNo), Is.EqualTo(5004));
-        }
-
-        [Test]
-        public void TestIgnorePossDupInResendRequest()
-        {
-            // Default is false
-            Assert.That(session.IgnorePossDupResendRequests, Is.EqualTo(false));
-
-            session.IgnorePossDupResendRequests = true;
-            // Logon 
-            Logon();
-
-            // NOS
-            QuickFix.FIX42.NewOrderSingle order = new QuickFix.FIX42.NewOrderSingle(
-                new QuickFix.Fields.ClOrdID("1"),
-                new QuickFix.Fields.HandlInst(QuickFix.Fields.HandlInst.MANUAL_ORDER),
-                new QuickFix.Fields.Symbol("IBM"),
-                new QuickFix.Fields.Side(QuickFix.Fields.Side.BUY),
-                new QuickFix.Fields.TransactTime(),
-                new QuickFix.Fields.OrdType(QuickFix.Fields.OrdType.LIMIT));
-
-            order.Header.SetField(new QuickFix.Fields.TargetCompID(sessionID.SenderCompID));
-            order.Header.SetField(new QuickFix.Fields.SenderCompID(sessionID.TargetCompID));
-            order.Header.SetField(new QuickFix.Fields.MsgSeqNum(seqNum++));
-            // This will generate resend requests
-            session.Send(order);
-
-            Assert.That(responder.msgLookup[QuickFix.Fields.MsgType.NEWORDERSINGLE].Count == 1);
-
-            QuickFix.Message msg = new QuickFix.FIX42.ResendRequest(
-                new QuickFix.Fields.BeginSeqNo(1),
-                new QuickFix.Fields.EndSeqNo(0));
-            msg.Header.SetField(new QuickFix.Fields.PossDupFlag(true));
-            SendTheMessage(msg);
-
-            Assert.That(responder.msgLookup[QuickFix.Fields.MsgType.NEWORDERSINGLE].Count == 1);
-        }
-
-        [Test]
-        public void TestDoesSessionExist()
-        {
-            QuickFix.SessionID invalidSessionID = new QuickFix.SessionID("FIX.4.2", "NOT_SENDER", "NOT_TARGET");
-            QuickFix.SessionID validSessionID = new QuickFix.SessionID("FIX.4.2", "SENDER", "TARGET");
-
-            Assert.That(QuickFix.Session.DoesSessionExist(invalidSessionID), Is.EqualTo(false));
-            Assert.That(QuickFix.Session.DoesSessionExist(validSessionID), Is.EqualTo(true));            
-        }
-
-        [Test]
-        public void TestSettingNextTargetMsgSeqNum()
-        {
-            session.NextTargetMsgSeqNum = 100;
-            Assert.That(session.NextTargetMsgSeqNum, Is.EqualTo(100));
-        }
-
-        [Test]
-        public void TestSettingNextSenderMsgSeqNum()
-        {
-            session.NextSenderMsgSeqNum = 200;
-            Assert.That(session.NextSenderMsgSeqNum, Is.EqualTo(200));
-        }
-
-        [Test]
-        public void TestGettingIsInitiator()
-        {
-            Assert.That(session2.IsInitiator, Is.EqualTo(true));
-        }
-
-        [Test]
-        public void TestGettingIsAcceptor()
-        {
-            Assert.That(session2.IsAcceptor, Is.EqualTo(false));
-        }
-
-        [Test]
-        public void TestMessageStoreAccessor()
-        {
-            List<string> messages = new List<string>();
-
-            messages.Clear();
-            session.MessageStore.Get(0, 100, messages);
-            Assert.That(messages.Count, Is.EqualTo(0));
-
-            Logon();
-
-            messages.Clear();
-            session.MessageStore.Get(0, 100, messages);
-            Assert.That(messages.Count, Is.EqualTo(1)); // logon response
-        }
-
-        [Test]
-        public void TestRequiresOrigSendingTime_Y()
-        {
-            // Under default configuration, session should reject a ResendRequest that lacks OrigSendingTime unset
-
-            // Check default is as expected
-            Assert.That(session.RequiresOrigSendingTime, Is.EqualTo(true));
-
-            Logon();
-
-            QuickFix.FIX42.SequenceReset sr = new QuickFix.FIX42.SequenceReset(new QuickFix.Fields.NewSeqNo(5));
-            sr.GapFillFlag = new QuickFix.Fields.GapFillFlag(true);
-            sr.Header.SetField(new QuickFix.Fields.PossDupFlag(true));
-
-            sr.Header.SetField(new QuickFix.Fields.MsgSeqNum(seqNum--)); // so it triggers DoTargetTooLow code
-
-            SendTheMessage(sr);
-
-            Assert.That(responder.msgLookup[QuickFix.Fields.MsgType.REJECT].Count == 1);
-            QuickFix.FIX42.Reject rej = responder.msgLookup[QuickFix.Fields.MsgType.REJECT].Peek() as QuickFix.FIX42.Reject;
-            Assert.That(rej.SessionRejectReason.getValue(), Is.EqualTo(QuickFix.Fields.SessionRejectReason.REQUIRED_TAG_MISSING));
-        }
-
-        [Test]
-        public void TestRequiresOrigSendingTime_N()
-        {
-            // Under OrigSendingTime=N, session will allow ResendRequest that lacks OrigSendingTime
-            session.RequiresOrigSendingTime = false;
-
-            Logon();
-
-            QuickFix.FIX42.SequenceReset sr = new QuickFix.FIX42.SequenceReset(new QuickFix.Fields.NewSeqNo(5));
-            sr.GapFillFlag = new QuickFix.Fields.GapFillFlag(true);
-            sr.Header.SetField(new QuickFix.Fields.PossDupFlag(true));
-
-            sr.Header.SetField(new QuickFix.Fields.MsgSeqNum(seqNum--)); // so it triggers DoTargetTooLow code
-
-            SendTheMessage(sr);
-
-            Assert.False(responder.msgLookup.ContainsKey(QuickFix.Fields.MsgType.REJECT));
-        }
-        [Test]
-        public void TestToAppDoNotSend()
-        {
-            Logon();
-            QuickFix.FIX42.NewOrderSingle order = new QuickFix.FIX42.NewOrderSingle(
-                 new QuickFix.Fields.ClOrdID("1"),
-                 new QuickFix.Fields.HandlInst(QuickFix.Fields.HandlInst.MANUAL_ORDER),
-                 new QuickFix.Fields.Symbol("IBM"),
-                 new QuickFix.Fields.Side(QuickFix.Fields.Side.BUY),
-                 new QuickFix.Fields.TransactTime(),
-                 new QuickFix.Fields.OrdType(QuickFix.Fields.OrdType.LIMIT));
-
-            application.doNotSendException = new QuickFix.DoNotSend();
-            session.Send(order);
-            Assert.False(SENT_NOS());
-        }
-
-        [Test]
-        public void TestToAppResendDoNotSend()
-        {
-            Logon();
-            QuickFix.FIX42.NewOrderSingle order = new QuickFix.FIX42.NewOrderSingle(
-                 new QuickFix.Fields.ClOrdID("1"),
-                 new QuickFix.Fields.HandlInst(QuickFix.Fields.HandlInst.MANUAL_ORDER),
-                 new QuickFix.Fields.Symbol("IBM"),
-                 new QuickFix.Fields.Side(QuickFix.Fields.Side.BUY),
-                 new QuickFix.Fields.TransactTime(),
-                 new QuickFix.Fields.OrdType(QuickFix.Fields.OrdType.LIMIT));
-
-            session.Send(order);
-            Assert.True(SENT_NOS());
-
-            responder.msgLookup.Remove(QuickFix.Fields.MsgType.NEWORDERSINGLE);
-            application.doNotSendException = new QuickFix.DoNotSend();
-
-            SendResendRequest(1, 0);
-            Assert.False(SENT_NOS());
-        }
-
-
-        [Test]
-        public void TestApplicationExtension()
-        {
-            var mockApp = new MockApplicationExt();
-            session = new QuickFix.Session(mockApp, new QuickFix.MemoryStoreFactory(), sessionID,
-                new QuickFix.DataDictionaryProvider(), new QuickFix.SessionSchedule(config), 0, new QuickFix.ScreenLogFactory(settings), new QuickFix.DefaultMessageFactory(), "blah");
-            session.SetResponder(responder);
-            session.CheckLatency = false;
-
-            Logon();
-            QuickFix.FIX42.NewOrderSingle order = new QuickFix.FIX42.NewOrderSingle(
-                new QuickFix.Fields.ClOrdID("1"),
-                new QuickFix.Fields.HandlInst(QuickFix.Fields.HandlInst.MANUAL_ORDER),
-                new QuickFix.Fields.Symbol("IBM"),
-                new QuickFix.Fields.Side(QuickFix.Fields.Side.BUY),
-                new QuickFix.Fields.TransactTime(),
-                new QuickFix.Fields.OrdType(QuickFix.Fields.OrdType.LIMIT));
-
-            order.Header.SetField(new QuickFix.Fields.TargetCompID(sessionID.SenderCompID));
-            order.Header.SetField(new QuickFix.Fields.SenderCompID(sessionID.TargetCompID));
-            order.Header.SetField(new QuickFix.Fields.MsgSeqNum(2));
-
-            session.Next(order.ToString());
-
-            Assert.That(mockApp.InterceptedMessageTypes.Count, Is.EqualTo(2));
-            Assert.True(mockApp.InterceptedMessageTypes.Contains(QuickFix.Fields.MsgType.LOGON));
-            Assert.True(mockApp.InterceptedMessageTypes.Contains(QuickFix.Fields.MsgType.NEWORDERSINGLE));
-        }
-
-        [Test]
-        public void TestRequireLogon()
-        {
-            QuickFix.FIX42.NewOrderSingle order = new QuickFix.FIX42.NewOrderSingle(
-                new QuickFix.Fields.ClOrdID("1"),
-                new QuickFix.Fields.HandlInst(QuickFix.Fields.HandlInst.MANUAL_ORDER),
-                new QuickFix.Fields.Symbol("IBM"),
-                new QuickFix.Fields.Side(QuickFix.Fields.Side.BUY),
-                new QuickFix.Fields.TransactTime(),
-                new QuickFix.Fields.OrdType(QuickFix.Fields.OrdType.LIMIT));
-            // This should cause disconnect, because first message is something other than a logon.
-            SendTheMessage(order);
-            Assert.That(DISCONNECTED());
-        }
-
+    }
+
+    [Test]
+    public void TestSequenceResetNoGapFillIsProcessed()
+    {
+        Assert.That(_session!.IgnorePossDupResendRequests, Is.EqualTo(false));
+        Logon();
+        SendNOSMessage();
+        SendNOSMessage();
+        Assert.That(_session.NextTargetMsgSeqNum, Is.EqualTo(4));
+
+        QuickFix.FIX42.SequenceReset sr = new(new NewSeqNo(150));
+        SendTheMessage(sr);
+
+        Assert.That(_session.NextTargetMsgSeqNum, Is.EqualTo(150));
+    }
+
+    [Test]
+    public void TestSequenceResetWithGapFillIsProcessed()
+    {
+        Assert.That(_session!.IgnorePossDupResendRequests, Is.EqualTo(false));
+        Logon();
+        SendNOSMessage();
+        SendNOSMessage();
+        Assert.That(_session.NextTargetMsgSeqNum, Is.EqualTo(4));
+
+        QuickFix.FIX42.SequenceReset sr = new(new NewSeqNo(150));
+        sr.GapFillFlag = new GapFillFlag(true);
+        SendTheMessage(sr);
+
+        Assert.That(_session.NextTargetMsgSeqNum, Is.EqualTo(150));
+    }
+
+    [Test]
+    public void TestSequenceResetDuringResendRequestIsProcessed()
+    {
+        Assert.That(_session!.IgnorePossDupResendRequests, Is.EqualTo(false));
+        _session.RequiresOrigSendingTime = false; // default is true
+        Logon();
+        SendNOSMessage(); // seq 2
+        SendNOSMessage(10); // causes ResendRequest to be sent
+        Assert.That(_session.NextTargetMsgSeqNum, Is.EqualTo(3));
+
+        var resendRequest =
+            (QuickFix.FIX42.ResendRequest)_responder.MsgLookup[MsgType.RESEND_REQUEST].Dequeue();
+        Assert.That(resendRequest.BeginSeqNo.Value, Is.EqualTo(3));
+        Assert.That(resendRequest.EndSeqNo.Value, Is.EqualTo(0));
+
+        // Resend & GapFill through seq=9
+        SendNOSMessage(3);
+        SendNOSMessage(4);
+        QuickFix.FIX42.SequenceReset sr = new(new NewSeqNo(9));
+        SendTheMessage(sr, 5);
+        SendNOSMessage(9);
+
+        // We already processed 10, so the next one is 11
+        Assert.That(_session.NextTargetMsgSeqNum, Is.EqualTo(11));
+    }
+
+    [Test]
+    public void TestObeyGapFillIfItReplacesAMessageOffTheQueue()
+    {
+        // issue #309: If GapFill has the same seqno of a message that was
+        //   processed off the queue, obey it anyway
+
+        Assert.That(_session!.IgnorePossDupResendRequests, Is.EqualTo(false));
+        _session.RequiresOrigSendingTime = false; // default is true
+        Logon();
+        SendNOSMessage(); // seq 2
+
+        QuickFix.FIX42.Heartbeat hb = new();
+        SendTheMessage(hb, 5); // seq=5, causes ResendRequest to be sent
+
+        // Verify the ResendRequest that was just sent
+        var resendRequest =
+            (QuickFix.FIX42.ResendRequest)_responder.MsgLookup[MsgType.RESEND_REQUEST].Dequeue();
+        Assert.That(resendRequest.BeginSeqNo.Value, Is.EqualTo(3));
+        Assert.That(resendRequest.EndSeqNo.Value, Is.EqualTo(0));
+
+        Assert.That(_session.NextTargetMsgSeqNum, Is.EqualTo(3));
+        Assert.That(_session.IsResendRequested);
+
+        // Resends
+        SendNOSMessage(3, possDupFlag: true);
+        SendNOSMessage(4, possDupFlag: true);
+        // Now the session processes the Heartbeat/seq=5 from its queue.
+        Assert.That(_session.NextTargetMsgSeqNum, Is.EqualTo(6));
+
+        // But the counterparty still needs to resend the seq=5!
+        // The 5 is a Heartbeat, an admin message, so it's a gapfill.
+        // The gapfill goes to 7, omitting ever sending a 6.
+        QuickFix.FIX42.SequenceReset sr = new(new NewSeqNo(7));
+        sr.Header.SetField(new PossDupFlag(true));
+        sr.SetField(new GapFillFlag(true));
+        SendTheMessage(sr, 5);
+
+        // Even though client already processed the original Heartbeat/seq=5,
+        //   it must not discard the GapFill 5.
+        Assert.That(_session.NextTargetMsgSeqNum, Is.EqualTo(7));
+    }
+
+    public void TestResendRequestGapFillBeforeFinish() {
+        // Setup: Establish connection.  Server sends Seq too high, causing client to ResendRequest.
+        Logon();
+        SendNOSMessage();
+        Assert.That(_session!.NextTargetMsgSeqNum, Is.EqualTo(3));
+        SendNOSMessage(8);
+
+        var resendReq = _responder.MsgLookup[MsgType.RESEND_REQUEST].Dequeue();
+        Assert.That(resendReq.GetULong(Tags.BeginSeqNo), Is.EqualTo(3));
+        Assert.That(resendReq.GetULong(Tags.EndSeqNo), Is.EqualTo(0));
+        Assert.That(_session.IsResendRequested);
+        Assert.That(_session.NextTargetMsgSeqNum, Is.EqualTo(3));
+
+        // Server sends gapfill to cover 3-6...
+        var seqReset = new QuickFix.FIX42.SequenceReset(new NewSeqNo(7));
+        seqReset.GapFillFlag = new GapFillFlag(true);
+        SendTheMessage(seqReset);
+        Assert.That(_session.NextTargetMsgSeqNum, Is.EqualTo(7));
+
+        // ...then resends 7 to complete the ResendRequest.
+        var nos = CreateNOSMessage(7);
+        nos.Header.SetField(new PossDupFlag(true));
+        nos.Header.SetField(new OrigSendingTime(DateTime.MinValue));
+        _session.Next(nos.ConstructString());
+
+        // After 7, the client processes 8 from its backlog queue.
+        Assert.That(_session.NextTargetMsgSeqNum, Is.EqualTo(9));
+    }
+
+    [Test]
+    public void TestResendRequestGapFillToFinish() {
+        // Setup: Establish connection.  Server sends Seq too high, causing client to ResendRequest.
+        Logon();
+        SendNOSMessage();
+        Assert.That(_session!.NextTargetMsgSeqNum, Is.EqualTo(3));
+        SendNOSMessage(8);
+
+        var resendReq = _responder.MsgLookup[MsgType.RESEND_REQUEST].Dequeue();
+        Assert.That(resendReq.GetULong(Tags.BeginSeqNo), Is.EqualTo(3));
+        Assert.That(resendReq.GetULong(Tags.EndSeqNo), Is.EqualTo(0));
+        Assert.That(_session.IsResendRequested);
+        Assert.That(_session.NextTargetMsgSeqNum, Is.EqualTo(3));
+
+        // Server sends gapfill to cover 3-7, which completes the ResendRequest.
+        // Then client processes 8 from its backlog queue.
+        var seqReset = new QuickFix.FIX42.SequenceReset(new NewSeqNo(8));
+        seqReset.GapFillFlag = new GapFillFlag(true);
+        SendTheMessage(seqReset);
+        // After the seqReset, engine processes 8 from the queue
+        Assert.That(_session.NextTargetMsgSeqNum, Is.EqualTo(9));
+        Assert.That(_session.IsResendRequested, Is.False);
     }
 }
+

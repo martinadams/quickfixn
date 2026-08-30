@@ -30,6 +30,7 @@
     <component name='HopGrp' required='N'/>
     <field name='ApplVerID' required='N'/>
     <field name='CstmApplVerID' required='N'/>
+    <field name='ApplExtID' required='N' />
   </header>
   <trailer>
     <field name='SignatureLength' required='N'/>
@@ -78,6 +79,9 @@
       <field name='Password' required='N'/>
       <field name='DefaultApplVerID' required='Y'/>
       <component name='MsgTypeGrp' required='N'/>
+    </message>
+    <message name="XMLnonFIX" msgtype="n" msgcat="admin">
+      <!-- this message has no body fields -->
     </message>
   </messages>
   <components>
@@ -151,7 +155,7 @@
       <value enum='k' description='BID_REQUEST'/>
       <value enum='l' description='BID_RESPONSE'/>
       <value enum='m' description='LIST_STRIKE_PRICE'/>
-      <value enum='n' description='XML_MESSAGE'/>
+      <value enum='n' description='XML_NON_FIX'/>
       <value enum='o' description='REGISTRATION_INSTRUCTIONS'/>
       <value enum='p' description='REGISTRATION_INSTRUCTIONS_RESPONSE'/>
       <value enum='q' description='ORDER_MASS_CANCEL_REQUEST'/>
@@ -309,5 +313,6 @@
     <field name='RefApplVerID' number='1130' type='STRING'/>
     <field name='RefCstmApplVerID' number='1131' type='STRING'/>
     <field name='DefaultApplVerID' number='1137' type='STRING'/>
+    <field name='ApplExtID' number='1156' type='INT'/>
   </fields>
 </fix>

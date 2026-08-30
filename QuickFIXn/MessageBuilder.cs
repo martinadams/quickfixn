@@ -1,71 +1,69 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+﻿namespace QuickFix;
 
-namespace QuickFix
+internal class MessageBuilder
 {
-    internal class MessageBuilder
+    private readonly bool _validateLengthAndChecksum;
+    private readonly DataDictionary.DataDictionary _sessionDict;
+    private readonly DataDictionary.DataDictionary _appDict;
+    private readonly IMessageFactory _msgFactory;
+
+    private Message? _message;
+    private readonly Fields.ApplVerID _defaultApplVerId;
+
+    public string OriginalString { get; }
+
+    public Fields.MsgType MsgType { get; }
+
+    /// <summary>
+    /// The BeginString from the raw FIX message
+    /// </summary>
+    public string BeginString { get; }
+
+    internal MessageBuilder(
+        string msgStr,
+        string defaultApplVerId,
+        bool validateLengthAndChecksum,
+        DataDictionary.DataDictionary sessionDict,
+        DataDictionary.DataDictionary appDict,
+        IMessageFactory msgFactory)
     {
-        private string _msgStr;
-        private bool _validateLengthAndChecksum;
-        private DataDictionary.DataDictionary _sessionDD;
-        private DataDictionary.DataDictionary _appDD;
-        private IMessageFactory _msgFactory;
+        OriginalString = msgStr;
+        _defaultApplVerId = new Fields.ApplVerID(defaultApplVerId);
+        _validateLengthAndChecksum = validateLengthAndChecksum;
+        _sessionDict = sessionDict;
+        _appDict = appDict;
+        _msgFactory = msgFactory;
+        MsgType = Message.IdentifyType(OriginalString);
+        BeginString = Message.ExtractBeginString(OriginalString);
+    }
 
-        private QuickFix.Fields.MsgType _msgType;
-        private string _beginString;
+    internal Message Build()
+    {
+        Message message = _msgFactory.Create(BeginString, _defaultApplVerId, MsgType.Value);
+        message.FromString(
+            OriginalString,
+            _validateLengthAndChecksum,
+            _sessionDict,
+            _appDict,
+            _msgFactory,
+            ignoreBody: false);
+        _message = message;
+        return _message;
+    }
 
-        private Message _message;
-
-        public string OriginalString { get { return _msgStr; } }
-        public QuickFix.Fields.MsgType MsgType { get { return _msgType; } }
-        public string BeginString { get { return _beginString; } }
-
-        internal MessageBuilder(
-            string msgStr,
-            bool validateLengthAndChecksum,
-            DataDictionary.DataDictionary sessionDD,
-            DataDictionary.DataDictionary appDD,
-            IMessageFactory msgFactory)
-        {
-            _msgStr = msgStr;
-            _validateLengthAndChecksum = validateLengthAndChecksum;
-            _sessionDD = sessionDD;
-            _appDD = appDD;
-            _msgFactory = msgFactory;
-
-            _msgType = Message.IdentifyType(_msgStr);
-            _beginString = Message.ExtractBeginString(_msgStr);
-        }
-
-        internal Message Build()
-        {
-            Message message = _msgFactory.Create(_beginString, _msgType.Obj);
-            message.FromString(
-                _msgStr,
-                _validateLengthAndChecksum,
-                _sessionDD,
-                _appDD,
-                _msgFactory);
-            _message = message;
+    internal Message RejectableMessage()
+    {
+        if (_message is not null)
             return _message;
-        }
 
-        internal Message RejectableMessage()
-        {
-            if (_message != null)
-                return _message;
-
-            Message message = _msgFactory.Create(_beginString, _msgType.Obj);
-            message.FromString(
-                _msgStr,
-                false,
-                _sessionDD,
-                _appDD,
-                _msgFactory,
-                true);
-            return message;
-        }
+        Message message = _msgFactory.Create(BeginString, MsgType.Value);
+        message.FromString(
+            OriginalString,
+            false,
+            _sessionDict,
+            _appDict,
+            _msgFactory,
+            true);
+        return message;
     }
 }

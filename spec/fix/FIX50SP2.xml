@@ -261,7 +261,7 @@
    <component name='InstrmtGrp' required='N' />
    <component name='InstrmtLegGrp' required='N' />
    <component name='UndInstrmtGrp' required='N' />
-   <component name='LinesOfTextGrp' required='Y' />
+   <component name='LinesOfTextGrp' required='N' />
    <field name='URLLink' required='N' />
    <field name='RawDataLength' required='N' />
    <field name='RawData' required='N' />
@@ -286,7 +286,7 @@
    <component name='InstrmtLegGrp' required='N' />
    <field name='OrderID' required='N' />
    <field name='ClOrdID' required='N' />
-   <component name='LinesOfTextGrp' required='Y' />
+   <component name='LinesOfTextGrp' required='N' />
    <field name='RawDataLength' required='N' />
    <field name='RawData' required='N' />
   </message>
@@ -3584,7 +3584,7 @@
    <component name='AttrbGrp' required='N' />
   </component>
   <component name='LinesOfTextGrp'>
-   <group name='NoLinesOfText' required='Y'>
+   <group name='NoLinesOfText' required='N'>
     <field name='Text' required='Y' />
     <field name='EncodedTextLen' required='N' />
     <field name='EncodedText' required='N' />
@@ -5755,13 +5755,7 @@
    <value enum='M' description='MEDIUM' />
   </field>
   <field number='26' name='IOIRefID' type='STRING' />
-  <field number='27' name='IOIQty' type='STRING'>
-   <value enum='0' description='1000000000' />
-   <value enum='S' description='SMALL' />
-   <value enum='M' description='MEDIUM' />
-   <value enum='L' description='LARGE' />
-   <value enum='U' description='UNDISCLOSED_QUANTITY' />
-  </field>
+  <field number='27' name='IOIQty' type='STRING' />
   <field number='28' name='IOITransType' type='CHAR'>
    <value enum='C' description='CANCEL' />
    <value enum='N' description='NEW' />

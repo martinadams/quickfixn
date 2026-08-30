@@ -1,52 +1,45 @@
 ﻿using System.Collections.Generic;
 
-namespace QuickFix
+namespace QuickFix;
+
+public class DataDictionaryProvider
 {
-    public class DataDictionaryProvider
+    private readonly Dictionary<string, DataDictionary.DataDictionary> _transportDataDictionaries;
+    private readonly Dictionary<string, DataDictionary.DataDictionary> _applicationDataDictionaries;
+    private readonly DataDictionary.DataDictionary _emptyDataDictionary;
+
+    public DataDictionaryProvider()
     {
-        private Dictionary<string, DataDictionary.DataDictionary> transportDataDictionaries_;
-        private Dictionary<string, DataDictionary.DataDictionary> applicationDataDictionaries_;
-        private DataDictionary.DataDictionary emptyDataDictionary_;
+        _transportDataDictionaries = new Dictionary<string, DataDictionary.DataDictionary>();
+        _applicationDataDictionaries = new Dictionary<string, DataDictionary.DataDictionary>();
+        _emptyDataDictionary = new DataDictionary.DataDictionary();
+    }
 
-        public DataDictionaryProvider()
-        {
-            transportDataDictionaries_ = new Dictionary<string, DataDictionary.DataDictionary>();
-            applicationDataDictionaries_ = new Dictionary<string, DataDictionary.DataDictionary>();
-            emptyDataDictionary_ = new DataDictionary.DataDictionary();
-        }
+    /// TODO need to make deeper copy?
+    public DataDictionaryProvider(DataDictionaryProvider src)
+    {
+        _transportDataDictionaries = new Dictionary<string, DataDictionary.DataDictionary>(src._transportDataDictionaries);
+        _applicationDataDictionaries = new Dictionary<string, DataDictionary.DataDictionary>(src._applicationDataDictionaries);
+        _emptyDataDictionary = new DataDictionary.DataDictionary(src._emptyDataDictionary);
+    }
 
-        /// TODO need to make deeper copy?
-        public DataDictionaryProvider(DataDictionaryProvider src)
-        {
-            transportDataDictionaries_ = new Dictionary<string, DataDictionary.DataDictionary>(src.transportDataDictionaries_);
-            applicationDataDictionaries_ = new Dictionary<string, DataDictionary.DataDictionary>(src.applicationDataDictionaries_);
-            emptyDataDictionary_ = new DataDictionary.DataDictionary(src.emptyDataDictionary_);
-        }
+    public void AddTransportDataDictionary(string beginString, DataDictionary.DataDictionary dataDictionary)
+    {
+        _transportDataDictionaries[beginString] = dataDictionary;
+    }
 
-        public void AddTransportDataDictionary(string beginString, DataDictionary.DataDictionary dataDictionary)
-        {
-            transportDataDictionaries_[beginString] = dataDictionary;
-        }
+    public void AddApplicationDataDictionary(string applVerId, DataDictionary.DataDictionary dataDictionary)
+    {
+        _applicationDataDictionaries[applVerId] = dataDictionary;
+    }
 
-        public void AddApplicationDataDictionary(string applVerID, DataDictionary.DataDictionary dataDictionary)
-        {
-            applicationDataDictionaries_[applVerID] = dataDictionary;
-        }
+    public DataDictionary.DataDictionary GetSessionDataDictionary(string beginString)
+    {
+        return _transportDataDictionaries.TryGetValue(beginString, out var value) ? value : _emptyDataDictionary;
+    }
 
-        public DataDictionary.DataDictionary GetSessionDataDictionary(string beginString)
-        {
-            DataDictionary.DataDictionary dd;
-            if (!transportDataDictionaries_.TryGetValue(beginString, out dd))
-                return emptyDataDictionary_;
-            return dd;
-        }
-
-        public DataDictionary.DataDictionary GetApplicationDataDictionary(string applVerID)
-        {
-            DataDictionary.DataDictionary dd;
-            if (!applicationDataDictionaries_.TryGetValue(applVerID, out dd))
-                return emptyDataDictionary_;
-            return dd;
-        }
+    public DataDictionary.DataDictionary GetApplicationDataDictionary(string applVerId)
+    {
+        return _applicationDataDictionaries.TryGetValue(applVerId, out var value) ? value : _emptyDataDictionary;
     }
 }
